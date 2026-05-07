@@ -1,0 +1,10 @@
+{
+	"basey": 9,
+	"spacewidth": 8,
+	"treshold": 0.20,
+	"color": [255, 255, 255],
+	"unblendmode": "raw",
+	"shadow": false,
+	"chars": "0123456789.mhrK%()",
+	"seconds": ".rh()"
+}

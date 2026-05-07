@@ -38,9 +38,11 @@ let tests = webpackImages({
 	buff45m: import("./imgs/buff45m.data.png"),
 	buff47m: import("./imgs/buff47m.data.png"),
 	buff49m: import("./imgs/buff49m.data.png"),
+	parens: import("./imgs/parens.data.png"),
+	parens2: import("./imgs/parens2.data.png"),
+	parens3: import("./imgs/parens3.data.png"),
 });
 
-// Expected values for each test image
 type Expected = { buffs: (string | null)[], debuffs: (string | null)[] };
 let expected: { [key: string]: Expected } = {
 	test1080p: {
@@ -52,8 +54,6 @@ let expected: { [key: string]: Expected } = {
 		debuffs: ["2.9"]
 	},
 	more3: {
-		// BUFF 1 "9" on golden bg reads as "50" (bg contamination)
-		// BUFF 2 star icon has no readable text
 		buffs: ["3", "50", null, null, null, null],
 		debuffs: ["3.3"]
 	},
@@ -69,102 +69,36 @@ let expected: { [key: string]: Expected } = {
 		buffs: ["50", "6m", null],
 		debuffs: []
 	},
-	bright1: {
-		buffs: ["1", "50", "39m", null],
-		debuffs: []
-	},
-	bright2: {
-		buffs: ["2", "50", "38m", null],
-		debuffs: []
-	},
-	bright3: {
-		buffs: ["3", "50", "38m", null],
-		debuffs: []
-	},
-	bright4: {
-		buffs: ["4", "50", "36m", null],
-		debuffs: []
-	},
-	bright5: {
-		buffs: ["5", "50", "36m", null],
-		debuffs: []
-	},
-	bright6: {
-		buffs: ["6", "50", "35m", null],
-		debuffs: []
-	},
-	bright7: {
-		buffs: ["7", "50", "29m", null],
-		debuffs: []
-	},
-	bright8: {
-		buffs: ["8", "50", "29m", null],
-		debuffs: []
-	},
-	bright9: {
-		buffs: ["9", "50", "29m", null],
-		debuffs: []
-	},
-	bright10: {
-		buffs: ["10", "50", "28m", null],
-		debuffs: []
-	},
+	bright1: { buffs: ["1", "50", "39m", null], debuffs: [] },
+	bright2: { buffs: ["2", "50", "38m", null], debuffs: [] },
+	bright3: { buffs: ["3", "50", "38m", null], debuffs: [] },
+	bright4: { buffs: ["4", "50", "36m", null], debuffs: [] },
+	bright5: { buffs: ["5", "50", "36m", null], debuffs: [] },
+	bright6: { buffs: ["6", "50", "35m", null], debuffs: [] },
+	bright7: { buffs: ["7", "50", "29m", null], debuffs: [] },
+	bright8: { buffs: ["8", "50", "29m", null], debuffs: [] },
+	bright9: { buffs: ["9", "50", "29m", null], debuffs: [] },
+	bright10: { buffs: ["10", "50", "28m", null], debuffs: [] },
 	debuff28: {
 		buffs: ["50", "2m", "2m", "56m", null, "8", "3", "4"],
 		debuffs: ["2.8", "1"]
 	},
-	debuff30: {
-		buffs: ["50", null],
-		debuffs: ["3.0"]
-	},
-	cap1: {
-		buffs: [],
-		debuffs: ["2.0"]
-	},
-	cap2: {
-		buffs: [],
-		debuffs: ["2.0"]
-	},
-	cap3: {
-		buffs: [],
-		debuffs: ["2.0"]
-	},
-	cap4: {
-		buffs: [],
-		debuffs: ["2.0"]
-	},
-	cap5: {
-		buffs: [],
-		debuffs: ["3.5"]
-	},
-	cap6: {
-		buffs: [],
-		debuffs: ["3.5"]
-	},
-	cap7: {
-		buffs: [],
-		debuffs: ["3.5"]
-	},
-	buff32m: {
-		buffs: ["50", "32m", null],
-		debuffs: []
-	},
-	buff37m: {
-		buffs: ["50", "37m", null],
-		debuffs: []
-	},
-	buff45m: {
-		buffs: ["50", "45m", null],
-		debuffs: []
-	},
-	buff47m: {
-		buffs: ["50", "47m", null],
-		debuffs: []
-	},
-	buff49m: {
-		buffs: ["50", "49m", null],
-		debuffs: []
-	}
+	debuff30: { buffs: ["50", null], debuffs: ["3.0"] },
+	cap1: { buffs: [], debuffs: ["2.0"] },
+	cap2: { buffs: [], debuffs: ["2.0"] },
+	cap3: { buffs: [], debuffs: ["2.0"] },
+	cap4: { buffs: [], debuffs: ["2.0"] },
+	cap5: { buffs: [], debuffs: ["3.5"] },
+	cap6: { buffs: [], debuffs: ["3.5"] },
+	cap7: { buffs: [], debuffs: ["3.5"] },
+	buff32m: { buffs: ["50", "32m", null], debuffs: [] },
+	buff37m: { buffs: ["50", "37m", null], debuffs: [] },
+	buff45m: { buffs: ["50", "45m", null], debuffs: [] },
+	buff47m: { buffs: ["50", "47m", null], debuffs: [] },
+	buff49m: { buffs: ["50", "49m", null], debuffs: [] },
+	parens: { buffs: [null, "16(2)", "4", "60", "216m", null], debuffs: [] },
+	parens2: { buffs: ["11(2)", "4", "4m"], debuffs: [] },
+	parens3: { buffs: ["6(3)", "4", "5m"], debuffs: [] }
 };
 
 
@@ -198,19 +132,15 @@ export default async function run() {
 				continue;
 			}
 
-			console.log(`  ${label} found: pos=[${reader.pos.x},${reader.pos.y}] scale=${reader.scale.toFixed(2)}x (${reader.buffsize}px)`);
+			console.log(`  ${label} found: pos=[${reader.pos.x},${reader.pos.y}]`);
 
 			// Crop buffer
-			let rect = reader.getCaptRect()!;
-			let cropX = Math.max(0, rect.x);
-			let cropY = Math.max(0, rect.y);
-			let cropW = Math.min(rect.width, imgdata.width - cropX);
-			let cropH = Math.min(rect.height, imgdata.height - cropY);
-			if (cropW < reader.buffsize || cropH < reader.buffsize) {
-				console.log(`  ${label}: crop too small`); continue;
-			}
-			reader.pos!.maxhor = Math.min(reader.pos!.maxhor, Math.floor((cropW - reader.buffsize) / reader.gridsize));
-			reader.pos!.maxver = Math.min(reader.pos!.maxver, Math.floor((cropH - reader.buffsize) / reader.gridsize));
+			let cropX = reader.pos.x;
+			let cropY = reader.pos.y;
+			let cropW = (reader.pos.maxhor + 1) * BuffReader.gridsize + BuffReader.buffsize;
+			let cropH = (reader.pos.maxver + 1) * BuffReader.gridsize + BuffReader.buffsize;
+			cropW = Math.min(cropW, imgdata.width - cropX);
+			cropH = Math.min(cropH, imgdata.height - cropY);
 			let croppedBuffer = imgdata.clone({ x: cropX, y: cropY, width: cropW, height: cropH });
 
 			let buffs: any[] | null = null;
@@ -219,12 +149,6 @@ export default async function run() {
 			}
 
 			if (!buffs) { console.log(`  ${label}: read returned null`); continue; }
-
-			// Compare each buff against expected
-			// Import AntiAlias for diagnostics
-			let { AntiAlias } = require("alt1/buffs");
-			let cleanedBuf = AntiAlias.cleanBuffer(croppedBuffer);
-			let brightCleanedBuf = AntiAlias.cleanBufferBright(croppedBuffer);
 
 			let maxIdx = Math.max(buffs.length, expValues.length);
 			for (let i = 0; i < maxIdx; i++) {
@@ -238,91 +162,30 @@ export default async function run() {
 					} catch (e) { actual = `ERROR: ${e}`; }
 				}
 
-				// Build status
 				let status = "";
-				let isFail = false;
 				if (expVal === null && actual === "") {
 					status = "PASS (no timer)";
 					totalPass++;
 				} else if (expVal === null && actual !== "") {
 					status = `FAIL: expected no timer, got "${actual}"`;
-					totalFail++; isFail = true;
+					totalFail++;
 				} else if (expVal !== null && actual === "") {
 					status = `FAIL: expected "${expVal}", got nothing`;
-					totalFail++; isFail = true;
+					totalFail++;
 				} else if (expVal !== null && actual === expVal) {
 					status = `PASS ✓`;
 					totalPass++;
 				} else {
 					status = `FAIL: expected "${expVal}", got "${actual}"`;
-					totalFail++; isFail = true;
+					totalFail++;
 				}
 
 				console.log(`    ${label} ${i}: ${status}${actual ? ` [read: "${actual}"]` : ""}`);
-
-				// Diagnostic dump for failures OR bright Buff 0
-				let isBrightBuff0 = i === 0 && i < buffs.length && AntiAlias.isBrightIcon(croppedBuffer, buffs[i].bufferx, buffs[i].buffery, reader.buffsize);
-				if ((isBrightBuff0 || (isFail && expVal)) && i < buffs.length) {
-					let bx = buffs[i].bufferx;
-					let by = buffs[i].buffery;
-					let iconSize = reader.buffsize;
-					let useBright = isBrightBuff0;
-					let diagBuf = useBright ? brightCleanedBuf : cleanedBuf;
-					let d = diagBuf.data;
-					let w = diagBuf.width;
-
-					// Show cleaned pixel grid for text area
-					let gridStr = "      Cleaned text area:\n";
-					for (let py = by + Math.round(14 * reader.scale); py < by + iconSize - 1; py++) {
-						let row = "      ";
-						for (let px = bx + 1; px < bx + iconSize - 1; px++) {
-							let pi = (py * w + px) * 4;
-							row += d[pi] > 200 ? "##" : "  ";
-						}
-						gridStr += row + "\n";
-					}
-					console.log(gridStr);
-
-					// Debug: show matchCharAt scores at key positions
-					let { AntiAlias: AA } = require("alt1/buffs");
-					let debugClean = useBright ? AA.cleanBufferBright(croppedBuffer) : AA.cleanBuffer(croppedBuffer);
-					let debugStr = "      matchCharAt scores:\n";
-					for (let dx = 0; dx < iconSize - 6; dx += 2) {
-						let testX = bx + 1 + dx;
-						for (let testY = by + Math.round(22 * reader.scale); testY <= by + Math.round(24 * reader.scale); testY++) {
-							let m = BuffReader.matchCharAt(debugClean, testX, testY, 0.4);
-							if (m) {
-								debugStr += `      x=${dx} y=${testY-by}: "${m.chr}" score=${m.score.toFixed(2)} width=${m.width}\n`;
-							}
-						}
-					}
-					console.log(debugStr);
-
-					// Debug: dot detection info — check bright pixels between character positions
-					if (actual) {
-						let oy2 = by + Math.round(23 * reader.scale);
-						let dotDebug = "      dot detection:\n";
-						for (let px2 = bx + 2; px2 < bx + iconSize - 2; px2++) {
-							let hasBright = false;
-							for (let dy2 = -3; dy2 <= 0; dy2++) {
-								let cy = oy2 + dy2;
-								if (cy >= 0 && cy < debugClean.height && px2 >= 0 && px2 < debugClean.width) {
-									let pi = (cy * debugClean.width + px2) * 4;
-									if (debugClean.data[pi] > 200) { hasBright = true; break; }
-								}
-							}
-							if (hasBright) dotDebug += `      col ${px2-bx}: bright\n`;
-						}
-						console.log(dotDebug);
-					}
-				}
 			}
 		}
 	}
 
-	console.log(`\n${"=".repeat(50)}`);
+	console.log("\n==================================================");
 	console.log(`RESULTS: ${totalPass} PASS, ${totalFail} FAIL`);
-	console.log(`${"=".repeat(50)}`);
-
-	globalThis.BuffReader = BuffReader;
+	console.log("==================================================");
 }

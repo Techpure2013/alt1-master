@@ -1,6 +1,7 @@
 import * as a1lib from "alt1/base";
 import * as OCR from "alt1/ocr";
 import { webpackImages, ImgRef } from "alt1/base";
+import type { ColortTriplet } from "alt1/ocr";
 
 var imgs = webpackImages({
 	buff: require("./imgs/buffborder.data.png"),
@@ -9,269 +10,12 @@ var imgs = webpackImages({
 	debuff_alt: require("./imgs/debuffborder_alt.data.png"),
 });
 
-var font = require("../fonts/aa_8px_buff_digits.fontmeta.json");
-font.maxspaces = 1;
-
-// Low-threshold font for OCR.readChar fallback — includes edge pixels with real alpha values
-var fontLow = require("../fonts/aa_8px_buff_digits_low.fontmeta.json");
-fontLow.maxspaces = 1;
+var font = require("../fonts/aa_8px_new.fontmeta.json");
+var font2 = require("../fonts/aa_8px_buff2.fontmeta.json");
+var fontLow = require("../fonts/aa_8px_buff2_low.fontmeta.json");
 
 function negmod(a: number, b: number) {
 	return ((a % b) + b) % b;
-}
-
-// Known border colors for generating scaled templates
-var BORDER_COLORS = {
-	buff: [
-		[78, 130, 22],   // new green
-		[90, 150, 25],   // old green
-	],
-	debuff: [
-		[177, 6, 3],     // new red
-		[204, 0, 0],     // old red
-	]
-};
-
-// Common RS3 UI scales: buffsize/gridsize pairs
-var KNOWN_SCALES = [
-	{ buffsize: 27, gridsize: 30 },  // 1080p / 100%
-	{ buffsize: 32, gridsize: 35 },  // 2K / ~119%
-	{ buffsize: 36, gridsize: 39 },  // ~133% (icons spaced 39px apart)
-	{ buffsize: 54, gridsize: 60 },  // 4K / 200%
-];
-
-/**
- * Generates a border template at a given size with a given color.
- * 1px solid border, transparent interior - matches RS3 buff/debuff borders.
- */
-function createBorderTemplate(size: number, r: number, g: number, b: number): ImageData {
-	var img = new ImageData(size, size);
-	var d = img.data;
-	for (var y = 0; y < size; y++) {
-		for (var x = 0; x < size; x++) {
-			var i = (y * size + x) * 4;
-			if (x === 0 || x === size - 1 || y === 0 || y === size - 1) {
-				d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = 255;
-			}
-			// interior stays (0,0,0,0) - transparent
-		}
-	}
-	return img;
-}
-
-/**
- * Preprocesses anti-aliased text into clean binary pixels for OCR.
- * Converts bright pixels to pure white, everything else to black.
- */
-export class AntiAlias {
-	static LUM_THRESHOLD = 150;
-
-	/**
-	 * Creates a full cleaned copy of a buffer where anti-aliased text
-	 * is converted to binary white/black pixels for reliable OCR matching.
-	 * Uses high luminance threshold (170) to filter out icon backgrounds
-	 * while keeping text (~200-210 luminance).
-	 * Also rejects highly saturated pixels (colored backgrounds).
-	 */
-	static cleanBuffer(buffer: ImageData, threshold?: number): ImageData {
-		var clean = new ImageData(buffer.width, buffer.height);
-		var src = buffer.data;
-		var dst = clean.data;
-		// Threshold * 3 to avoid division: (r+g+b)/3 > T  ⟹  r+g+b > T*3
-		var lumThresh3 = (threshold != null ? threshold : AntiAlias.LUM_THRESHOLD) * 3;
-		// Use Uint32Array view for fast 4-byte pixel writes
-		var dst32 = new Uint32Array(dst.buffer);
-		var white = 0xFFFFFFFF; // RGBA all 255
-		var black = 0xFF000000; // RGB 0, A 255 (little-endian: ABGR)
-		for (var i = 0, j = 0; i < src.length; i += 4, j++) {
-			var r = src[i], g = src[i + 1], b = src[i + 2];
-			// Branchless max/min using ternary (faster than Math.max/min)
-			var maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-			var minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-			dst32[j] = (r + g + b > lumThresh3 && maxC - minC < 60) ? white : black;
-		}
-		return clean;
-	}
-
-	/**
-	 * Computes an adaptive luminance threshold for a specific icon.
-	 * Samples the artwork area (non-text, non-border portion) to estimate
-	 * background brightness. For dark backgrounds the standard threshold works;
-	 * for medium-bright backgrounds we raise the threshold above the background
-	 * so gray artwork pixels don't leak through as false text.
-	 */
-	static getIconThreshold(buffer: ImageData, iconX: number, iconY: number, iconSize: number): number {
-		var src = buffer.data;
-		var w = buffer.width;
-		var h = buffer.height;
-
-		// Artwork region: skip 1px border, scan top ~50% of icon (well above text zone)
-		var y0 = iconY + 1; if (y0 < 0) y0 = 0;
-		var y1 = iconY + Math.round(iconSize * 0.50); if (y1 > h) y1 = h;
-		var x0 = iconX + 1; if (x0 < 0) x0 = 0;
-		var x1 = iconX + iconSize - 1; if (x1 > w) x1 = w;
-
-		var bgLums: number[] = [];
-		for (var py = y0; py < y1; py++) {
-			var rowOff = py * w;
-			for (var px = x0; px < x1; px++) {
-				var i = (rowOff + px) << 2;
-				var r = src[i], g = src[i + 1], b = src[i + 2];
-				var maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-				var minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-				if (maxC - minC < 60) {
-					bgLums.push((r + g + b) / 3);
-				}
-			}
-		}
-
-		if (bgLums.length < 5) return AntiAlias.LUM_THRESHOLD;
-
-		bgLums.sort((a, b) => a - b);
-		// Use median (P50) — robust to text pixel outliers that leak into the scan area.
-		// Only a genuinely bright background (median > 130) triggers adaptation.
-		var bgMedian = bgLums[Math.floor(bgLums.length * 0.50)];
-
-		if (bgMedian < 130) return AntiAlias.LUM_THRESHOLD;
-
-		return Math.min(190, Math.max(AntiAlias.LUM_THRESHOLD, bgMedian + 20));
-	}
-
-	/**
-	 * Detects if a buff icon has bright grayscale artwork that would contaminate
-	 * threshold-based text cleaning. Counts pixels in the ARTWORK area (top 14 rows)
-	 * that survive the standard cleaning filter (lum>150, sat<60). Icons with
-	 * bright low-saturation artwork have many such pixels, while dark icons have few.
-	 */
-	static isBrightIcon(buffer: ImageData, ox: number, oy: number, iconSize: number): boolean {
-		var src = buffer.data;
-		var w = buffer.width;
-		var h = buffer.height;
-		var artworkPixels = 0;
-		// Clamp bounds once
-		var y0 = oy + 1, y1 = oy + 14;
-		var x0 = ox + 1, x1 = ox + iconSize - 1;
-		if (x0 < 0) x0 = 0; if (x1 > w) x1 = w;
-		if (y0 < 0) y0 = 0; if (y1 > h) y1 = h;
-		// lum > 150 ⟹ r+g+b > 450
-		for (var py = y0; py < y1; py++) {
-			var rowOff = py * w;
-			for (var px = x0; px < x1; px++) {
-				var i = (rowOff + px) << 2;
-				var r = src[i], g = src[i + 1], b = src[i + 2];
-				var maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-				var minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-				if (r + g + b > 450 && maxC - minC < 60) artworkPixels++;
-			}
-		}
-		if (artworkPixels <= 50) return false;
-		// Check border color: debuff icons (red border) should never be treated as bright,
-		// even if their artwork has many gray pixels. Sample top border row.
-		var redBorder = 0, greenBorder = 0;
-		for (var bpx = x0; bpx < x1; bpx++) {
-			var bi = (oy * w + bpx) << 2;
-			var br = src[bi], bg = src[bi + 1];
-			if (br > 100 && br > bg * 2) redBorder++;
-			if (bg > 50 && bg > br) greenBorder++;
-		}
-		// Only suppress bright for moderate artworkPixels (50-100) — above 100 the icon
-		// genuinely has bright artwork that needs shadow-mask cleaning even on debuffs
-		if (redBorder > greenBorder && redBorder > 3 && artworkPixels < 100) return false;
-		return true;
-	}
-
-	/**
-	 * Shadow-masked cleaning for bright icons.
-	 * Text has a dark shadow outline (lum < 35) baked in by the game engine.
-	 * Only keeps cleaned pixels that are within 2px of a shadow pixel,
-	 * removing artwork pixels that lack the text shadow signature.
-	 */
-	static cleanBufferBright(buffer: ImageData, dilationRadius = 2): ImageData {
-		var src = buffer.data;
-		var w = buffer.width;
-		var h = buffer.height;
-		var size = w * h;
-
-		// Pass 1: build shadow map — lum < 50 ⟹ r+g+b < 150
-		var shadowMap = new Uint8Array(size);
-		for (var i = 0, j = 0; i < src.length; i += 4, j++) {
-			if (src[i] + src[i + 1] + src[i + 2] < 150) shadowMap[j] = 1;
-		}
-
-		// Pass 2: separable dilation — horizontal then vertical (O(n*r) instead of O(n*r²))
-		var tempMap = new Uint8Array(size);
-		// Horizontal pass
-		for (var y = 0; y < h; y++) {
-			var row = y * w;
-			for (var x = 0; x < w; x++) {
-				if (shadowMap[row + x]) {
-					var x0 = x - dilationRadius; if (x0 < 0) x0 = 0;
-					var x1 = x + dilationRadius; if (x1 >= w) x1 = w - 1;
-					for (var dx = x0; dx <= x1; dx++) tempMap[row + dx] = 1;
-				}
-			}
-		}
-		// Vertical pass
-		var dilated = new Uint8Array(size);
-		for (var x = 0; x < w; x++) {
-			for (var y = 0; y < h; y++) {
-				if (tempMap[y * w + x]) {
-					var y0 = y - dilationRadius; if (y0 < 0) y0 = 0;
-					var y1 = y + dilationRadius; if (y1 >= h) y1 = h - 1;
-					for (var dy = y0; dy <= y1; dy++) dilated[dy * w + x] = 1;
-				}
-			}
-		}
-
-		// Pass 3: clean with shadow mask — use Uint32Array for fast writes
-		var clean = new ImageData(w, h);
-		var dst32 = new Uint32Array(clean.data.buffer);
-		var white = 0xFFFFFFFF;
-		var black = 0xFF000000;
-		var lumThresh3 = AntiAlias.LUM_THRESHOLD * 3;
-		for (var i = 0, j = 0; i < src.length; i += 4, j++) {
-			var r = src[i], g = src[i + 1], b = src[i + 2];
-			var maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-			var minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-			dst32[j] = (r + g + b > lumThresh3 && maxC - minC < 60 && dilated[j]) ? white : black;
-		}
-		return clean;
-	}
-
-	/**
-	 * Creates a cleaned copy of a buffer region, converting anti-aliased text
-	 * to binary white/black, then scales to 1x (27px icon) resolution for OCR.
-	 */
-	static cleanAndScale(buffer: ImageData, ox: number, oy: number, w: number, h: number, scale: number): ImageData {
-		// Target size at 1x
-		var tw = Math.round(w / scale);
-		var th = Math.round(h / scale);
-		var clean = new ImageData(tw, th);
-		var src = buffer.data;
-		var dst = clean.data;
-
-		for (var ty = 0; ty < th; ty++) {
-			for (var tx = 0; tx < tw; tx++) {
-				var di = (ty * tw + tx) * 4;
-				// Sample from source at scaled position
-				var sx = ox + Math.round(tx * scale);
-				var sy = oy + Math.round(ty * scale);
-				if (sx < 0 || sx >= buffer.width || sy < 0 || sy >= buffer.height) {
-					dst[di] = dst[di + 1] = dst[di + 2] = 0; dst[di + 3] = 255;
-					continue;
-				}
-				var si = (sy * buffer.width + sx) * 4;
-				var lum = (src[si] + src[si + 1] + src[si + 2]) / 3;
-				if (lum > AntiAlias.LUM_THRESHOLD) {
-					dst[di] = dst[di + 1] = dst[di + 2] = 255;
-				} else {
-					dst[di] = dst[di + 1] = dst[di + 2] = 0;
-				}
-				dst[di + 3] = 255;
-			}
-		}
-		return clean;
-	}
 }
 
 
@@ -282,25 +26,23 @@ export class Buff {
 	buffer: ImageData;
 	bufferx: number;
 	buffery: number;
-	scale: number;
-	constructor(buffer: ImageData, x: number, y: number, isdebuff: boolean, scale: number) {
+	constructor(buffer: ImageData, x: number, y: number, isdebuff: boolean) {
 		this.buffer = buffer;
 		this.bufferx = x;
 		this.buffery = y;
 		this.isdebuff = isdebuff;
-		this.scale = scale;
 	}
 	readArg(type: BuffTextTypes) {
-		return BuffReader.readArg(this.buffer, this.bufferx + Math.round(2 * this.scale), this.buffery + Math.round(23 * this.scale), type, this.scale);
+		return BuffReader.readArg(this.buffer, this.bufferx + 2, this.buffery + 25, type);
 	}
 	readTime() {
-		return BuffReader.readTime(this.buffer, this.bufferx + Math.round(2 * this.scale), this.buffery + Math.round(23 * this.scale), this.scale);
+		return BuffReader.readTime(this.buffer, this.bufferx + 2, this.buffery + 25);
 	}
 	compareBuffer(img: ImageData) {
-		return BuffReader.compareBuffer(this.buffer, this.bufferx + Math.round(1 * this.scale), this.buffery + Math.round(1 * this.scale), img);
+		return BuffReader.compareBuffer(this.buffer, this.bufferx + 1, this.buffery + 1, img);
 	}
 	countMatch(img: ImageData, aggressive?: boolean) {
-		return BuffReader.countMatch(this.buffer, this.bufferx + Math.round(1 * this.scale), this.buffery + Math.round(1 * this.scale), img, aggressive);
+		return BuffReader.countMatch(this.buffer, this.bufferx + 1, this.buffery + 1, img, aggressive);
 	}
 }
 
@@ -308,74 +50,22 @@ export default class BuffReader {
 	pos: { x: number, y: number, maxhor: number, maxver: number } | null = null;
 	debuffs = false;
 
-	/** Detected icon size (27 at 1080p, 32 at 2K, etc.) */
-	buffsize = 27;
-	/** Detected grid spacing (30 at 1080p, 35 at 2K, etc.) */
-	gridsize = 30;
-	/** Detected UI scale factor (1.0 at 1080p) */
-	scale = 1.0;
+	static buffsize = 27;
+	static gridsize = 30;
 
-	matchedBorder: ImageData | null = null;
-
-	/**
-	 * Try to find the buff/debuff bar by testing border templates at multiple scales.
-	 */
 	find(img?: ImgRef) {
 		if (!img) { img = a1lib.captureHoldFullRs(); }
 		if (!img) { return null; }
-
-		var colorKey = this.debuffs ? "debuff" : "buff";
-		var colors = BORDER_COLORS[colorKey];
-
-		// Try each known scale
-		for (var si = 0; si < KNOWN_SCALES.length; si++) {
-			var ks = KNOWN_SCALES[si];
-
-			// Try each border color variant at this scale
-			for (var ci = 0; ci < colors.length; ci++) {
-				var template = createBorderTemplate(ks.buffsize, colors[ci][0], colors[ci][1], colors[ci][2]);
-				var poslist = img.findSubimage(template);
-
-				if (poslist.length > 0) {
-					this.buffsize = ks.buffsize;
-					this.gridsize = ks.gridsize;
-					this.scale = ks.buffsize / 27;
-					this.matchedBorder = template;
-					console.log("Matched scale: " + ks.buffsize + "x" + ks.buffsize + " (scale " + this.scale.toFixed(2) + "x) color=(" + colors[ci].join(",") + ")");
-
-					// Grid clustering (same as original)
-					return this._clusterGrid(poslist);
-				}
-			}
-		}
-
-		// Fallback: try the original loaded templates (exact image match)
-		var primary = this.debuffs ? imgs.debuff : imgs.buff;
-		var alt = this.debuffs ? imgs.debuff_alt : imgs.buff_alt;
-		for (var tmpl of [primary, alt]) {
-			var poslist = img.findSubimage(tmpl);
-			if (poslist.length > 0) {
-				this.matchedBorder = tmpl;
-				this.buffsize = tmpl.width;
-				this.gridsize = Math.round(tmpl.width * 30 / 27);
-				this.scale = tmpl.width / 27;
-				return this._clusterGrid(poslist);
-			}
-		}
-
-		return null;
-	}
-
-	private _clusterGrid(poslist: { x: number, y: number }[]) {
+		var poslist = img.findSubimage(this.debuffs ? imgs.debuff : imgs.buff);
+		var poslist_alt = img.findSubimage(this.debuffs ? imgs.debuff_alt : imgs.buff_alt);
+		for (var ai = 0; ai < poslist_alt.length; ai++) { poslist.push(poslist_alt[ai]); }
+		if (poslist.length == 0) { return null; }
 		type BuffPos = { n: number, x: number, y: number }
 		var grids: BuffPos[] = [];
 		for (var a in poslist) {
 			var ongrid = false;
 			for (var b in grids) {
-				var xmod = negmod(grids[b].x - poslist[a].x, this.gridsize);
-				var ymod = negmod(grids[b].y - poslist[a].y, this.gridsize);
-				// Allow ±1px tolerance in grid alignment
-				if ((xmod <= 1 || xmod >= this.gridsize - 1) && (ymod <= 1 || ymod >= this.gridsize - 1)) {
+				if (negmod(grids[b].x - poslist[a].x, BuffReader.gridsize) == 0 && negmod(grids[b].x - poslist[a].x, BuffReader.gridsize) == 0) {
 					grids[b].x = Math.min(grids[b].x, poslist[a].x);
 					grids[b].y = Math.min(grids[b].y, poslist[a].y);
 					grids[b].n++;
@@ -395,15 +85,13 @@ export default class BuffReader {
 		}
 		if (above2 > 1) { console.log("Warning, more than one possible buff bar location"); }
 		if (!best) { return null; }
-		this.pos = { x: best.x, y: best.y, maxhor: Math.max(5, best.n - 1), maxver: 1 };
+		this.pos = { x: best.x, y: best.y, maxhor: Math.max(5, best.n), maxver: 1 };
 		return true;
 	}
-
 	getCaptRect() {
 		if (!this.pos) { return null; }
-		return new a1lib.Rect(this.pos.x, this.pos.y, (this.pos.maxhor + 1) * this.gridsize, (this.pos.maxver + 1) * this.gridsize);
+		return new a1lib.Rect(this.pos.x, this.pos.y, (this.pos.maxhor + 1) * BuffReader.gridsize, (this.pos.maxver + 1) * BuffReader.gridsize);
 	}
-
 	read(buffer?: ImageData) {
 		if (!this.pos) { throw new Error("no pos"); }
 		var r: Buff[] = [];
@@ -412,37 +100,20 @@ export default class BuffReader {
 		if (!buffer) { buffer = a1lib.capture(rect.x, rect.y, rect.width, rect.height); }
 		var maxhor = 0;
 		var maxver = 0;
-
 		for (var ix = 0; ix <= this.pos.maxhor; ix++) {
 			for (var iy = 0; iy <= this.pos.maxver; iy++) {
-				var x = ix * this.gridsize;
-				var y = iy * this.gridsize;
+				var x = ix * BuffReader.gridsize;
+				var y = iy * BuffReader.gridsize;
 
-				// Try matched border first, then alternates
-				var match = false;
-				var bordersToTry: ImageData[] = [];
+				if (x + BuffReader.buffsize > buffer.width || y + BuffReader.buffsize > buffer.height) { break; }
 
-				if (this.matchedBorder) bordersToTry.push(this.matchedBorder);
-
-				// Generate alternates at detected scale
-				var colorKey = this.debuffs ? "debuff" : "buff";
-				var colors = BORDER_COLORS[colorKey];
-				for (var ci = 0; ci < colors.length; ci++) {
-					var tmpl = createBorderTemplate(this.buffsize, colors[ci][0], colors[ci][1], colors[ci][2]);
-					bordersToTry.push(tmpl);
+				//Have to require exact match here as we get transparency bs otherwise
+				var match = buffer.pixelCompare((this.debuffs ? imgs.debuff : imgs.buff), x, y) == 0;
+				if (!match) {
+					match = buffer.pixelCompare((this.debuffs ? imgs.debuff_alt : imgs.buff_alt), x, y) == 0;
 				}
-
-				for (var ti = 0; ti < bordersToTry.length && !match; ti++) {
-					try {
-						match = buffer.pixelCompare(bordersToTry[ti], x, y) == 0;
-						if (match) { this.matchedBorder = bordersToTry[ti]; }
-					} catch (e) {
-						// Out of bounds
-					}
-				}
-
 				if (!match) { break; }
-				r.push(new Buff(buffer, x, y, this.debuffs, this.scale));
+				r.push(new Buff(buffer, x, y, this.debuffs));
 				maxhor = Math.max(maxhor, ix);
 				maxver = Math.max(maxver, iy);
 			}
@@ -468,9 +139,16 @@ export default class BuffReader {
 				var i1 = buffer.pixelOffset(ox + x, oy + y);
 				var i2 = buffimg.pixelOffset(x, y);
 
-				if (data2[i2 + 3] != 255) { r.skipped++; continue; }
-				if (data1[i1] == 255 && data1[i1 + 1] == 255 && data1[i1 + 2] == 255) { r.skipped++; continue; }
-				if (data1[i1] == 0 && data1[i1 + 1] == 0 && data1[i1 + 2] == 0) { r.skipped++; continue; }
+				if (data2[i2 + 3] != 255) { r.skipped++; continue; }//transparent buff pixel
+
+				var R1 = data1[i1], G1 = data1[i1 + 1], B1 = data1[i1 + 2];
+				var lum = (R1 + G1 + B1) / 3;
+				var maxc = Math.max(R1, G1, B1);
+				var minc = Math.min(R1, G1, B1);
+				var sat = maxc > 0 ? ((maxc - minc) / maxc) * 255 : 0;
+
+				if (lum > 140 && sat < 60) { r.skipped++; continue; }//bright low-sat pixel - part of buff time text
+				if (lum < 50) { r.skipped++; continue; }//dark pixel - part of buff time text shadow
 
 				var d = a1lib.ImageDetect.coldif(data1[i1], data1[i1 + 1], data1[i1 + 2], data2[i2], data2[i2 + 1], data2[i2 + 2], 255);
 				r.tested++;
@@ -486,6 +164,7 @@ export default class BuffReader {
 		return r;
 	}
 
+
 	static isolateBuffer(buffer: ImageData, ox: number, oy: number, buffimg: ImageData) {
 		var count = BuffReader.countMatch(buffer, ox, oy, buffimg);
 		if (count.passed < 50) { return; }
@@ -498,11 +177,26 @@ export default class BuffReader {
 				var i1 = buffer.pixelOffset(ox + x, oy + y);
 				var i2 = buffimg.pixelOffset(x, y);
 
-				if (data2[i2 + 3] != 255) { continue; }
-				if (data1[i1] == 255 && data1[i1 + 1] == 255 && data1[i1 + 2] == 255 || data1[i1] == 0 && data1[i1 + 1] == 0 && data1[i1 + 2] == 0) {
+				if (data2[i2 + 3] != 255) { continue; }//transparent buff pixel
+
+				var R1 = data1[i1], G1 = data1[i1 + 1], B1 = data1[i1 + 2];
+				var lum1 = (R1 + G1 + B1) / 3;
+				var maxc1 = Math.max(R1, G1, B1);
+				var minc1 = Math.min(R1, G1, B1);
+				var sat1 = maxc1 > 0 ? ((maxc1 - minc1) / maxc1) * 255 : 0;
+
+				//==== new buffer has text on it ====
+				if ((lum1 > 140 && sat1 < 60) || lum1 < 50) {
 					continue;
 				}
-				if (data2[i2] == 255 && data2[i2 + 1] == 255 && data2[i2 + 2] == 255 || data2[i2] == 0 && data2[i2 + 1] == 0 && data2[i2 + 2] == 0) {
+
+				//==== old buf has text on it, use the new one ====
+				var R2 = data2[i2], G2 = data2[i2 + 1], B2 = data2[i2 + 2];
+				var lum2 = (R2 + G2 + B2) / 3;
+				var maxc2 = Math.max(R2, G2, B2);
+				var minc2 = Math.min(R2, G2, B2);
+				var sat2 = maxc2 > 0 ? ((maxc2 - minc2) / maxc2) * 255 : 0;
+				if ((lum2 > 140 && sat2 < 60) || lum2 < 50) {
 					data2[i2 + 0] = data1[i1 + 0];
 					data2[i2 + 1] = data1[i1 + 1];
 					data2[i2 + 2] = data1[i1 + 2];
@@ -517,675 +211,543 @@ export default class BuffReader {
 				}
 			}
 		}
-		if (removed > 0) { console.log(removed + " pixels removed from buff template image"); }
+		if (removed > 0) { console.log(removed + " pixels remove from buff template image"); }
 	}
 
-	/**
-	 * Match a single character from the font at a given position in the cleaned buffer.
-	 * Uses percentage-based scoring (not canblend) to tolerate anti-aliased differences.
-	 * Returns { chr, score, width } or null.
-	 */
-	static matchCharAt(clean: ImageData, x: number, y: number, minMatch = 0.55, charScale = 1.0): { chr: string, score: number, width: number } | null {
-		var d = clean.data;
-		var w = clean.width;
-		var h = clean.height;
-		var bestChr = "";
-		var bestScore = -1;
-		var bestWidth = 0;
-		var step = font.shadow ? 4 : 3;
-		var baseY = y - Math.round(font.basey * charScale);
-		var isUnit = charScale === 1.0;
-
-		for (var ci = 0; ci < font.chars.length; ci++) {
-			var fc = font.chars[ci];
-			if (fc.secondary) continue;
-
-			var matched = 0;
-			var total = 0;
-			var pixels = fc.pixels;
-			var templateTotal = pixels.length / step;
-			var minTotal = templateTotal * 0.6;
-
-			for (var pi = 0; pi < pixels.length; pi += step) {
-				// At scale 1.0, skip Math.round
-				var bx = isUnit ? x + pixels[pi] : x + Math.round(pixels[pi] * charScale);
-				var by = isUnit ? baseY + pixels[pi + 1] : baseY + Math.round(pixels[pi + 1] * charScale);
-
-				if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
-
-				total++;
-				// Use bitshift for *4: (by * w + bx) << 2
-				if (d[(by * w + bx) << 2] > 200) matched++;
-			}
-
-			if (total < 5 || total < minTotal) continue;
-
-			var score = matched / total;
-			if (matched < 8 || matched < (total >> 1)) continue;
-
-			var weightedScore = total >= 15 ? score : score * total / 15;
-
-			if (score >= minMatch && weightedScore > bestScore) {
-				bestScore = weightedScore;
-				bestChr = fc.chr;
-				bestWidth = fc.width;
-			}
-		}
-
-		if (!bestChr) return null;
-		return { chr: bestChr, score: bestScore, width: bestWidth };
-	}
-
-	/**
-	 * Match a character using canblend() on the raw (uncleaned) buffer.
-	 * Uses the font's actual alpha values (from PNG transparency) to provide
-	 * per-pixel tolerance: edge pixels with low alpha accept more background
-	 * blending, while core pixels with high alpha demand near-white.
-	 */
-	static matchCharAtRaw(buffer: ImageData, x: number, y: number, maxPenalty = 3000, charScale = 1.0): { chr: string, score: number, width: number } | null {
-		var d = buffer.data;
-		var w = buffer.width;
-		var h = buffer.height;
-		var bestChr = "";
-		var bestPenalty = maxPenalty;
-		var bestWidth = 0;
-		var step = font.shadow ? 4 : 3;
-		var baseY = y - Math.round(font.basey * charScale);
-		var isUnit = charScale === 1.0;
-
-		for (var ci = 0; ci < font.chars.length; ci++) {
-			var fc = font.chars[ci];
-			if (fc.secondary) continue;
-
-			var penalty = 0;
-			var pixels = fc.pixels;
-			var tested = 0;
-			var aborted = false;
-
-			for (var pi = 0; pi < pixels.length; pi += step) {
-				var bx = isUnit ? x + pixels[pi] : x + Math.round(pixels[pi] * charScale);
-				var by = isUnit ? baseY + pixels[pi + 1] : baseY + Math.round(pixels[pi + 1] * charScale);
-
-				if (bx < 0 || bx >= w || by < 0 || by >= h) continue;
-
-				var idx = (by * w + bx) << 2;
-				var alpha = pixels[pi + 2] / 255;
-
-				// Use 255 as expected color: the grayscale clean buffer has white (255)
-				// for core text pixels and intermediate values for edge pixels.
-				if (font.shadow) {
-					var lum = pixels[pi + 3] / 255;
-					penalty += OCR.canblend(d[idx], d[idx + 1], d[idx + 2], 255 * lum, 255 * lum, 255 * lum, alpha);
-				} else {
-					penalty += OCR.canblend(d[idx], d[idx + 1], d[idx + 2], 255, 255, 255, alpha);
-				}
-				tested++;
-
-				if (penalty > maxPenalty) { aborted = true; break; }
-			}
-
-			if (aborted || tested < 5) continue;
-
-			if (penalty < bestPenalty) {
-				bestPenalty = penalty;
-				bestChr = fc.chr;
-				bestWidth = fc.width;
-			}
-		}
-
-		if (!bestChr) return null;
-		var score = Math.max(0, 1 - bestPenalty / maxPenalty);
-		return { chr: bestChr, score: score, width: bestWidth };
-	}
-
-	/**
-	 * Reads timer text from a buff icon. Uses column analysis to find text positions,
-	 * then matches characters using percentage-based scoring on the OCR font templates.
-	 * Works at any UI scale.
-	 */
-	static readArg(buffer: ImageData, ox: number, oy: number, type: BuffTextTypes, scale = 1.0) {
+	static readArg(buffer: ImageData, ox: number, oy: number, type: BuffTextTypes) {
 		var lines: string[] = [];
-		var scaledDy = Math.round(10 * scale);
-
-		var matchScale = 1.0;
-
-		// Detect bright icons: derive icon position from text position
-		// Bright icons have grayscale artwork that survives cleaning, producing false reads
-		var iconX = ox - Math.round(2 * scale);
-		var iconY = oy - Math.round(23 * scale);
-		var iconSize = Math.round(27 * scale);
-		var bright = AntiAlias.isBrightIcon(buffer, iconX, iconY, iconSize);
-		var adaptiveThresh = bright ? AntiAlias.LUM_THRESHOLD : AntiAlias.getIconThreshold(buffer, iconX, iconY, iconSize);
-		var clean = bright ? AntiAlias.cleanBufferBright(buffer) : AntiAlias.cleanBuffer(buffer, adaptiveThresh);
-
-		// Only scan at the text baseline (dy=0)
-		var topoConverted = false;
-		for (var dy = 0; dy < 1; dy += 1) {
-			var readY = oy + dy;
-			if (readY < 0 || readY >= buffer.height) continue;
-
-			// Chain matchCharAt calls with search window to absorb drift
-			type CharMatch = { chr: string, x: number, endX: number, score: number };
-			var matches: CharMatch[] = [];
-			var searchX = Math.max(0, ox - 1); // start 1px before to catch edge-aligned text
-			var searchW = 6;
-			var maxX = Math.min(ox + Math.round(22 * matchScale), clean.width - Math.round(6 * matchScale));
-			var misses = 0;
-
-			var maxMatches = bright ? 3 : 4;
-			while (searchX < maxX && misses < 3 && matches.length < maxMatches) {
-				// Try matchCharAt at positions in the search window
-				var bestMatch: ReturnType<typeof BuffReader.matchCharAt> = null;
-				var bestMatchX = searchX;
-
-				var brightMinMatch = bright ? 0.80 : 0.60;
-				// For non-bright 2nd+ chars, bias toward gap>=2 (room for decimal dot).
-				// On debuff icons the correct digit is at gap=2 but scores lower than
-				// "7" at gap=0 due to anti-aliasing losses. A 0.20 bonus fixes this
-				// while not affecting buff icons where gap=0 scores are much higher.
-				var prevEndX = matches.length > 0 ? matches[matches.length - 1].endX : -99;
-				var useGapBias = !bright && matches.length > 0;
-				var bestEffective = -1;
-				for (var sx = searchX; sx < searchX + searchW; sx++) {
-					for (var sy = readY - 2; sy <= readY + 2; sy++) {
-						// Primary: binary matchCharAt on cleaned buffer
-						var m = BuffReader.matchCharAt(clean, sx, sy, brightMinMatch, matchScale);
-						// For non-bright 2nd+ chars: also try OCR readChar with low-threshold
-						// font on raw buffer. The low font has edge pixels with real alpha that
-						// canblend uses to distinguish "0" from "9". Pick the better result.
-						if (!bright && matches.length > 0) {
-							var rc = OCR.readChar(buffer, fontLow, [210, 210, 210], sx, sy, false);
-							if (rc) {
-								var rcScore = 1 - rc.sizescore / 400;
-								var rcGap = sx - matches[matches.length - 1].endX;
-								// Apply same gap bias as binary matcher
-								var rcEffective = rcScore + (rcGap >= 2 ? 0.20 : 0);
-								var mEffective = m ? m.score + (useGapBias && (sx - prevEndX) >= 2 ? 0.20 : 0) : -1;
-								if (rcEffective > mEffective) {
-									m = { chr: rc.chr, score: rcScore, width: rc.basechar.width };
-								}
-							}
-						} else if (!bright) {
-							// First char: also try OCR readChar competitively, pick better
-							var rc2 = OCR.readChar(buffer, fontLow, [210, 210, 210], sx, sy, false);
-							if (rc2) {
-								var rcScore2 = 1 - rc2.sizescore / 400;
-								if (!m || rcScore2 > m.score) {
-									m = { chr: rc2.chr, score: rcScore2, width: rc2.basechar.width };
-								}
-							}
-						}
-						if (m) {
-							var gap = sx - prevEndX;
-							var effective = m.score + (useGapBias && gap >= 2 ? 0.20 : 0);
-							if (effective > bestEffective) {
-								bestEffective = effective;
-								bestMatch = m;
-								bestMatchX = sx;
-							}
-						}
-					}
-				}
-
-				if (bestMatch) {
-					var advWidth = Math.round(bestMatch.width * matchScale);
-					matches.push({ chr: bestMatch.chr, x: bestMatchX, endX: bestMatchX + advWidth, score: bestMatch.score });
-					if (bestMatch.width > 7) {
-						searchX = bestMatchX + advWidth;
-						searchW = Math.round(3 * matchScale);
-					} else {
-						searchX = bestMatchX + advWidth - Math.round(2 * matchScale);
-						searchW = Math.round(5 * matchScale);
-					}
-					misses = 0;
-				} else {
-					searchX += font.spacewidth;
-					misses++;
+		var firstResult: any = null;
+		var firstResultY = oy;
+		// Initial scan: dy=-10 (second line) and dy=0 (main line)
+		for (var dy = -10; dy < 10; dy += 10) {
+			var result = OCR.readLine(buffer, font, [255, 255, 255], ox, oy + dy, true);
+			if (result.text) {
+				if (!firstResult) { firstResult = result; firstResultY = oy + dy; }
+				lines.push(result.text);
+			}
+		}
+		// Fallback: oy-2 (old UI text position)
+		if (lines.length === 0) {
+			for (var dy = -10; dy < 10; dy += 10) {
+				var result = OCR.readLine(buffer, font, [255, 255, 255], ox, oy - 2 + dy, true);
+				if (result.text) {
+					if (!firstResult) { firstResult = result; firstResultY = oy - 2 + dy; }
+					lines.push(result.text);
 				}
 			}
+			if (lines.length > 0) { oy = oy - 2; }
+		}
 
-			// Bright icon fallback: if no matches found with 2px shadow dilation,
-			// retry with 3px dilation + stricter 0.90 threshold for open-curve digits like "3"
-			if (bright && matches.length === 0) {
-				var cleanWide = AntiAlias.cleanBufferBright(buffer, 3);
-				var fallbackX = Math.max(0, ox - 1);
-				var fallbackW = 6;
-				var fallbackMaxX = Math.min(ox + Math.round(22 * matchScale), cleanWide.width - Math.round(6 * matchScale));
-				var fallbackMisses = 0;
-				while (fallbackX < fallbackMaxX && fallbackMisses < 3 && matches.length < 4) {
-					var fbMatch: ReturnType<typeof BuffReader.matchCharAt> = null;
-					var fbMatchX = fallbackX;
-					for (var fsx = fallbackX; fsx < fallbackX + fallbackW; fsx++) {
-						for (var fsy = readY - 2; fsy <= readY + 2; fsy++) {
-							var fm = BuffReader.matchCharAt(cleanWide, fsx, fsy, 0.90, matchScale);
-							if (fm && (!fbMatch || fm.score > fbMatch.score)) {
-								fbMatch = fm;
-								fbMatchX = fsx;
-							}
-						}
-					}
-					if (fbMatch) {
-						var fbAdvWidth = Math.round(fbMatch.width * matchScale);
-						matches.push({ chr: fbMatch.chr, x: fbMatchX, endX: fbMatchX + fbAdvWidth, score: fbMatch.score });
-						fallbackX = fbMatchX + fbAdvWidth - Math.round(2 * matchScale);
-						fallbackW = Math.round(5 * matchScale);
-						fallbackMisses = 0;
-					} else {
-						fallbackX += font.spacewidth;
-						fallbackMisses++;
+		// Font1 retry system (dy=0 only)
+		if (lines.length === 0) {
+			var colors: ColortTriplet[] = [[255, 255, 255], [210, 210, 210]];
+			for (var ci = 0; ci < colors.length && lines.length === 0; ci++) {
+				for (var ddy = -2; ddy <= 2 && lines.length === 0; ddy++) {
+					for (var ddx = 0; ddx <= 3 && lines.length === 0; ddx++) {
+						var retryResult = OCR.readLine(buffer, font, colors[ci], ox + ddx, oy + ddy, true);
+						if (retryResult.text) { lines.push(retryResult.text); }
 					}
 				}
 			}
-
-			// Post-hoc dot detection between matched characters
-			var text = "";
-			for (var mi = 0; mi < matches.length; mi++) {
-				if (mi > 0) {
-					var prevEnd = matches[mi - 1].endX;
-					var currStart = matches[mi].x;
-					var dotCheckStart = Math.max(0, prevEnd - 3);
-					var dotCheckEnd = Math.min(clean.width - 1, currStart + 2);
-					var dotFound = false;
-					for (var dotX = dotCheckStart; dotX <= dotCheckEnd && !dotFound; dotX++) {
-						var hasBright = false;
-						for (var dy2 = -1; dy2 <= 0; dy2++) {
-							var checkY = readY + dy2;
-							if (checkY >= 0 && checkY < clean.height) {
-								if (clean.data[(checkY * clean.width + dotX) << 2] > 200) { hasBright = true; break; }
-							}
-						}
-						if (!hasBright) continue;
-						var leftDark = true;
-						if (dotX > 0) {
-							for (var dy3 = -1; dy3 <= 0; dy3++) {
-								var ly = readY + dy3;
-								if (ly >= 0 && ly < clean.height) {
-									if (clean.data[(ly * clean.width + (dotX - 1)) << 2] > 200) { leftDark = false; break; }
-								}
-							}
-						}
-						var rightDark = true;
-						if (dotX + 1 < clean.width) {
-							for (var dy3 = -1; dy3 <= 0; dy3++) {
-								var ry = readY + dy3;
-								if (ry >= 0 && ry < clean.height) {
-									if (clean.data[(ry * clean.width + (dotX + 1)) << 2] > 200) { rightDark = false; break; }
-								}
-							}
-						}
-						var aboveDark = true;
-						var aboveY = readY - 3;
-						if (aboveY >= 0) {
-							if (clean.data[(aboveY * clean.width + dotX) << 2] > 200) aboveDark = false;
-						}
-						if (leftDark && rightDark && aboveDark) {
-							dotFound = true;
-						}
-					}
-					// Bounded raw-buffer dot fallback for sub-threshold dot pixels.
-					// Only fires when gap between chars is 2-6px (real dots create space;
-					// adjacent chars like "18" have gap <=1). Uses lower lum threshold on
-					// raw buffer since the dot pixel fluctuates near the cleaning threshold.
-					// Raw-buffer dot fallback: when gap is 2-6px and raw lum > 115,
-					// a dot likely exists. Skip full isolation check — at gap=2 the
-					// characters' edge pixels fail the left/right isolation, but the
-					// gap width itself is evidence of a dot. Only check above-dark
-					// to avoid matching vertical strokes.
-					if (!dotFound && !bright) {
-						var gapWidth = currStart - prevEnd;
-						if (gapWidth >= 1 && gapWidth <= 6) {
-							for (var dotXr = dotCheckStart; dotXr <= dotCheckEnd && !dotFound; dotXr++) {
-								for (var dyr = -1; dyr <= 0; dyr++) {
-									var cyr = readY + dyr;
-									if (cyr < 0 || cyr >= buffer.height || dotXr < 0 || dotXr >= buffer.width) continue;
-									var rawI = (cyr * buffer.width + dotXr) * 4;
-									var rawLum = (buffer.data[rawI] + buffer.data[rawI + 1] + buffer.data[rawI + 2]) / 3;
-									if (rawLum < 115) continue;
-									// Only check above-dark (no vertical stroke)
-									var ayr = readY - 3;
-									var aboveDarkR = true;
-									if (ayr >= 0 && clean.data[(ayr * clean.width + dotXr) << 2] > 200) aboveDarkR = false;
-									if (aboveDarkR) { dotFound = true; break; }
-								}
-							}
-						}
-					}
-					if (dotFound) { text += "."; }
-				}
-				text += matches[mi].chr;
-			}
-
-
-			// Smart fallback: "3" vs "8" — check pixels unique to "8"
-			// Only check the LAST "3" before a suffix (m/K/%) or end of text
-			// The first "3" in "38m" is real; only the second (misread "8") needs conversion
-			for (var mi2 = 0; mi2 < matches.length; mi2++) {
-				if (matches[mi2].chr !== "3") continue;
-				// Only check if this is the last digit before a suffix or end
-				var nextChr = mi2 + 1 < matches.length ? matches[mi2 + 1].chr : "";
-				var isLastDigit = nextChr === "m" || nextChr === "K" || nextChr === "%" || nextChr === "" || mi2 === matches.length - 1;
-				if (!isLastDigit) continue;
-				var matchX3 = matches[mi2].x;
-				// Find "3" and "8" templates
-				var t3pix: number[] | null = null;
-				var t8pix: number[] | null = null;
-				var t3w = 0, t8w = 0;
-				for (var fci = 0; fci < font.chars.length; fci++) {
-					if (font.chars[fci].chr === "3") { t3pix = font.chars[fci].pixels; t3w = font.chars[fci].width; }
-					if (font.chars[fci].chr === "8") { t8pix = font.chars[fci].pixels; t8w = font.chars[fci].width; }
-				}
-				if (!t3pix || !t8pix) continue;
-
-				// Build set of "3" pixel positions for fast lookup
-				var step = font.shadow ? 4 : 3;
-				var t3set = new Set<string>();
-				for (var pi3 = 0; pi3 < t3pix.length; pi3 += step) {
-					t3set.add(t3pix[pi3] + "," + t3pix[pi3 + 1]);
-				}
-
-				// Check "8"-only pixels (in "8" but NOT in "3")
-				var uniqueTotal = 0, uniqueMatch = 0;
-				for (var pi8 = 0; pi8 < t8pix.length; pi8 += step) {
-					var key = t8pix[pi8] + "," + t8pix[pi8 + 1];
-					if (t3set.has(key)) continue; // shared pixel, skip
-					// This pixel is unique to "8"
-					var bx8 = matchX3 + Math.round(t8pix[pi8] * matchScale);
-					var by8 = readY - Math.round(font.basey * matchScale) + Math.round(t8pix[pi8 + 1] * matchScale);
-					if (bx8 < 0 || bx8 >= clean.width || by8 < 0 || by8 >= clean.height) continue;
-					uniqueTotal++;
-					if (clean.data[(by8 * clean.width + bx8) * 4] > 200) uniqueMatch++;
-				}
-
-				// If >60% of "8"-only pixels are bright, it's "8" not "3"
-				if (uniqueTotal >= 4 && uniqueMatch / uniqueTotal >= 0.60) {
-					matches[mi2].chr = "8";
-				}
-			}
-
-			// 6→3 disambiguation: artwork contamination fills "3"'s open left side,
-			// making it look like "6"'s closed loop. Re-check with shadow-mask cleaning
-			// which strips artwork pixels that lack nearby text shadows.
-			if (matches.length > 0 && matches[0].chr === "6" && !bright) {
-				var m6 = matches[0];
-				var cleanShadow6 = AntiAlias.cleanBufferBright(buffer);
-				var best3s = 0, best6s = 0;
-				for (var sy6 = readY - 2; sy6 <= readY + 2; sy6++) {
-					var ms6 = BuffReader.matchCharAt(cleanShadow6, m6.x, sy6, 0.40, matchScale);
-					if (ms6) {
-						if (ms6.chr === "3" && ms6.score > best3s) best3s = ms6.score;
-						if (ms6.chr === "6" && ms6.score > best6s) best6s = ms6.score;
-					}
-				}
-				if (best3s > best6s) {
-					matches[0].chr = "3";
-				}
-			}
-
-			// Rebuild text from matches after 3→8 conversions, re-inserting dots
-			text = "";
-			for (var mr = 0; mr < matches.length; mr++) {
-				if (mr > 0) {
-					var pEnd = matches[mr - 1].endX;
-					var cStart = matches[mr].x;
-					var dotCheckS = Math.max(0, pEnd - 3);
-					var dotCheckE = Math.min(clean.width - 1, cStart + 2);
-					var hasDot = false;
-					for (var dx2 = dotCheckS; dx2 <= dotCheckE && !hasDot; dx2++) {
-						for (var ddy = -1; ddy <= 0; ddy++) {
-							var cy2 = readY + ddy;
-							if (cy2 >= 0 && cy2 < clean.height && dx2 >= 0 && dx2 < clean.width) {
-								if (clean.data[(cy2 * clean.width + dx2) << 2] > 200) {
-									var ld = true, rd = true, ad = true;
-									if (dx2 > 0) { for (var d3=-1;d3<=0;d3++){var ly2=readY+d3;if(ly2>=0&&ly2<clean.height){if(clean.data[(ly2*clean.width+(dx2-1))<<2]>200){ld=false;break;}}}}
-									if (dx2+1<clean.width) { for (var d4=-1;d4<=0;d4++){var ry2=readY+d4;if(ry2>=0&&ry2<clean.height){if(clean.data[(ry2*clean.width+(dx2+1))<<2]>200){rd=false;break;}}}}
-									var ay = readY - 3; if (ay>=0 && clean.data[(ay*clean.width+dx2)<<2]>200) ad=false;
-									if (ld && rd && ad) { hasDot = true; break; }
-								}
-							}
-						}
-					}
-					// Raw-buffer dot fallback (same as first pass — above-dark only)
-					if (!hasDot && !bright) {
-						var gapW = cStart - pEnd;
-						if (gapW >= 2 && gapW <= 6) {
-							for (var dxr2 = dotCheckS; dxr2 <= dotCheckE && !hasDot; dxr2++) {
-								for (var ddyr2 = -1; ddyr2 <= 0; ddyr2++) {
-									var cyr2 = readY + ddyr2;
-									if (cyr2 < 0 || cyr2 >= buffer.height || dxr2 < 0 || dxr2 >= buffer.width) continue;
-									var rawI2 = (cyr2 * buffer.width + dxr2) * 4;
-									var rawLum2 = (buffer.data[rawI2] + buffer.data[rawI2 + 1] + buffer.data[rawI2 + 2]) / 3;
-									if (rawLum2 < 115) continue;
-									var ayr2 = readY - 3;
-									var aboveDkR2 = true;
-									if (ayr2 >= 0 && clean.data[(ayr2 * clean.width + dxr2) << 2] > 200) aboveDkR2 = false;
-									if (aboveDkR2) { hasDot = true; break; }
-								}
-							}
-						}
-					}
-					if (hasDot) text += ".";
-				}
-				text += matches[mr].chr;
-			}
-
-			// Topological 9→0 disambiguation: "0" has an enclosed dark interior (hole)
-			// that "9" doesn't (tail creates opening). Flood-fill from bounding box
-			// edges and count unreachable dark pixels. Immune to anti-aliasing.
-			// Only run on bare decimal patterns (no suffix like m/K/%)
-			var hasTopoSuffix = false;
-			for (var tsi = 0; tsi < matches.length; tsi++) {
-				if (matches[tsi].chr === "m" || matches[tsi].chr === "K" || matches[tsi].chr === "%") hasTopoSuffix = true;
-			}
-			if (matches.length >= 2 && !hasTopoSuffix && matches[1].chr === "9") {
-				var m9t = matches[1];
-				var cLeft = m9t.x;
-				var cTop = readY - Math.round(font.basey * matchScale);
-				var cW = m9t.endX - m9t.x;
-				var cH = Math.round(font.height * matchScale);
-				if (cW > 0 && cH > 0 && cLeft >= 0 && cTop >= 0 && cLeft + cW <= clean.width && cTop + cH <= clean.height) {
-					// Extract binary grid from cleaned buffer (1=bright, 0=dark)
-					var tGrid = new Uint8Array(cW * cH);
-					for (var tgy = 0; tgy < cH; tgy++) {
-						for (var tgx = 0; tgx < cW; tgx++) {
-							if (clean.data[((cTop + tgy) * clean.width + (cLeft + tgx)) << 2] > 200) {
-								tGrid[tgy * cW + tgx] = 1;
-							}
-						}
-					}
-					// Flood-fill from all edges (mark exterior dark pixels as 2)
-					var tQueue: number[] = [];
-					var tSeed = function(tr: number, tc: number) {
-						if (tr >= 0 && tr < cH && tc >= 0 && tc < cW && tGrid[tr * cW + tc] === 0) {
-							tGrid[tr * cW + tc] = 2;
-							tQueue.push(tr, tc);
-						}
-					};
-					for (var te = 0; te < cW; te++) { tSeed(0, te); tSeed(cH - 1, te); }
-					for (var te2 = 0; te2 < cH; te2++) { tSeed(te2, 0); tSeed(te2, cW - 1); }
-					var tqi = 0;
-					while (tqi < tQueue.length) {
-						var tr = tQueue[tqi++], tc = tQueue[tqi++];
-						tSeed(tr - 1, tc); tSeed(tr + 1, tc); tSeed(tr, tc - 1); tSeed(tr, tc + 1);
-					}
-					// Count enclosed dark pixels and compute vertical centroid
-					// "0": large centered hole (centroid relY ~0.45-0.55)
-					// "9": small or no hole, if any it's in upper third (centroid relY <0.35)
-					var enclosed = 0;
-					var centroidSumY = 0;
-					for (var ti = 0; ti < tGrid.length; ti++) {
-						if (tGrid[ti] === 0) {
-							enclosed++;
-							centroidSumY += Math.floor(ti / cW); // row index
-						}
-					}
-					var centroidRelY = enclosed > 0 ? (centroidSumY / enclosed) / cH : 0;
-					// Require both: enough enclosed pixels AND centroid in middle portion
-					if (enclosed >= 3 && centroidRelY > 0.38) {
-						topoConverted = true;
-						matches[1] = { chr: "0", x: m9t.x, endX: m9t.endX, score: m9t.score };
-						// Rebuild text with "0"
-						text = "";
-						for (var tri = 0; tri < matches.length; tri++) {
-							if (tri > 0) {
-								var trGap = matches[tri].x - matches[tri - 1].endX;
-								if (trGap >= 1) text += ".";
-							}
-							text += matches[tri].chr;
+			// Last resort: backward at limited offsets
+			if (lines.length === 0) {
+				for (var ddy = -2; ddy <= 2 && lines.length === 0; ddy++) {
+					for (var ddx = 0; ddx <= 1 && lines.length === 0; ddx++) {
+						var retryResult = OCR.readLine(buffer, font, [255, 255, 255], ox + ddx, oy + ddy, true, true);
+						if (retryResult.text && retryResult.text.trim() === retryResult.text) {
+							lines.push(retryResult.text);
 						}
 					}
 				}
 			}
+		}
 
-			// Smart fallback: 3+ digits followed by another digit = likely "Xm" misread
-			// When 3 digits + "m", the "m" at icon edge often loses to a digit
-			if (/^\d{4}$/.test(text)) {
-				text = text.slice(0, 3) + "m";
-			}
-			// Smart fallback: "XX.Y" or "XXX.Y" = likely "XXm" with "m" misread as ".digit"
-			// Valid decimal timers are always X.Y (single digit before dot), never 2+ digits before dot
-			if (/^\d{2,3}\.\d$/.test(text)) {
-				text = text.replace(/\.\d$/, "m");
-			}
-			// Smart fallback: decimal X.7 or X.9 → check if "3" or "8" matches
-			if (/^\d+\.[79]$/.test(text) && matches.length >= 2) {
-				var lastDig = matches[matches.length - 1];
-				// High confidence "7"/"9" match (≥0.85) = likely "7" or "8", not "3"
-				// Only check "8" with relaxed threshold; skip "3" conversion
-				var highConf7 = lastDig.score >= 0.85;
-				if (highConf7) {
-					// Only check if it's actually "8" — don't consider "3"
-					for (var sx3 = lastDig.x - 1; sx3 <= lastDig.x + 1; sx3++) {
-						for (var sy3 = readY - 2; sy3 <= readY + 2; sy3++) {
-							var t3pix3: number[] | null = null;
-							var t8pix3: number[] | null = null;
-							for (var fci3 = 0; fci3 < font.chars.length; fci3++) {
-								if (font.chars[fci3].chr === "3") t3pix3 = font.chars[fci3].pixels;
-								if (font.chars[fci3].chr === "8") t8pix3 = font.chars[fci3].pixels;
-							}
-							if (t3pix3 && t8pix3) {
-								var step3 = font.shadow ? 4 : 3;
-								var t3set3 = new Set<string>();
-								for (var p3j = 0; p3j < t3pix3.length; p3j += step3) {
-									t3set3.add(t3pix3[p3j] + "," + t3pix3[p3j + 1]);
-								}
-								var uT3 = 0, uM3 = 0;
-								for (var p8j = 0; p8j < t8pix3.length; p8j += step3) {
-									var k3 = t8pix3[p8j] + "," + t8pix3[p8j + 1];
-									if (t3set3.has(k3)) continue;
-									var bx83 = sx3 + Math.round(t8pix3[p8j] * matchScale);
-									var by83 = sy3 - Math.round(font.basey * matchScale) + Math.round(t8pix3[p8j + 1] * matchScale);
-									if (bx83 < 0 || bx83 >= clean.width || by83 < 0 || by83 >= clean.height) continue;
-									uT3++;
-									if (clean.data[(by83 * clean.width + bx83) * 4] > 200) uM3++;
-								}
-								if (uT3 >= 4 && uM3 / uT3 >= 0.60) {
-									text = text.slice(0, -1) + "8";
-								}
-							}
-							break; // only check one position
+		// Cache baseLine for reuse in decimal/second pass/m-detection/%
+		var baseLine = OCR.readLine(buffer, font, [255, 255, 255], ox, oy, true);
+
+		// Font2 system - only when font1 found <=1 char
+		var joinedLen = lines.join("").length;
+		if (joinedLen <= 1) {
+			var botC = "";
+			var botCY = -1;
+			var topT = "";
+			var parenFound = false;
+			var botColors: ColortTriplet[] = [[255, 255, 255], [210, 210, 210], [255, 255, 0], [255, 152, 31]];
+
+			// Scan entire buff with font2 — check each result for parens
+			var bestParenLine = "";
+			var bestParenY = -1;
+			for (var bci = 0; bci < botColors.length; bci++) {
+				for (var boy = 0; boy <= oy + 5; boy++) {
+					for (var bcb = 0; bcb < 2; bcb++) {
+						// Try font2 and fontLow (low threshold, no shadow, has "()" chars)
+						for (var bfi = 0; bfi < 2; bfi++) {
+						var br = OCR.readLine(buffer, bfi === 0 ? font2 : fontLow, botColors[bci], ox, boy, bcb === 0);
+						if (!br.text) { continue; }
+						// Keep longest overall for fallback
+						if (br.text.length > botC.length) { botC = br.text; botCY = boy; }
+						// Check for direct parens in cleaned text (only when font1 found nothing)
+						var cleaned = br.text.replace(/[^0-9mhrK%()]/g, "");
+						if (joinedLen === 0 && /^\d?\(\d/.test(cleaned) && cleaned.length > bestParenLine.length) {
+							if (cleaned.indexOf(")") === -1) { cleaned += ")"; }
+							bestParenLine = cleaned;
+							bestParenY = boy;
 						}
-						break;
-					}
-				}
-				var found3 = false;
-				if (!highConf7) for (var sx3 = lastDig.x - 1; sx3 <= lastDig.x + 1 && !found3; sx3++) {
-					for (var sy3 = readY - 2; sy3 <= readY + 2 && !found3; sy3++) {
-						for (var fi3 = 0; fi3 < font.chars.length; fi3++) {
-							var fc3 = font.chars[fi3];
-							if (fc3.chr !== "3") continue;
-							var m3 = 0, t3 = 0;
-							for (var pi3 = 0; pi3 < fc3.pixels.length; pi3 += (font.shadow ? 4 : 3)) {
-								var px3 = fc3.pixels[pi3], py3 = fc3.pixels[pi3 + 1];
-								var bx3 = sx3 + Math.round(px3 * matchScale);
-								var by3 = sy3 - Math.round(font.basey * matchScale) + Math.round(py3 * matchScale);
-								if (bx3 < 0 || bx3 >= clean.width || by3 < 0 || by3 >= clean.height) continue;
-								t3++;
-								if (clean.data[(by3 * clean.width + bx3) * 4] > 200) m3++;
-							}
-							if (t3 >= 8 && m3 / t3 >= 0.40) {
-								// Before converting to "3", check if "8" is more likely
-								// using unique-pixel analysis (pixels in "8" but NOT in "3")
-								var t3pix2: number[] | null = null;
-								var t8pix2: number[] | null = null;
-								for (var fci2 = 0; fci2 < font.chars.length; fci2++) {
-									if (font.chars[fci2].chr === "3") t3pix2 = font.chars[fci2].pixels;
-									if (font.chars[fci2].chr === "8") t8pix2 = font.chars[fci2].pixels;
+						// Check for dot pattern (font2 reads "(" as ".")
+						var raw = br.text.replace(/ /g, "");
+						if (raw.length >= 4 && raw.length <= 9) {
+							// Situation 1: digit + dots + digit + dots — only when font1 found nothing (prevents debuff false positives)
+							if (joinedLen === 0) {
+								var dp1 = raw.match(/^(\d)\.{1,3}(\d)\.{1,3}$/);
+								if (dp1) {
+									var pl = dp1[1] + "(" + dp1[2] + ")";
+									if (pl.length > bestParenLine.length) { bestParenLine = pl; bestParenY = boy; }
 								}
-								var is8 = false;
-								if (t3pix2 && t8pix2) {
-									var step2 = font.shadow ? 4 : 3;
-									var t3set2 = new Set<string>();
-									for (var p3i = 0; p3i < t3pix2.length; p3i += step2) {
-										t3set2.add(t3pix2[p3i] + "," + t3pix2[p3i + 1]);
-									}
-									var uTotal2 = 0, uMatch2 = 0;
-									for (var p8i = 0; p8i < t8pix2.length; p8i += step2) {
-										var key2 = t8pix2[p8i] + "," + t8pix2[p8i + 1];
-										if (t3set2.has(key2)) continue;
-										var bx82 = sx3 + Math.round(t8pix2[p8i] * matchScale);
-										var by82 = sy3 - Math.round(font.basey * matchScale) + Math.round(t8pix2[p8i + 1] * matchScale);
-										if (bx82 < 0 || bx82 >= clean.width || by82 < 0 || by82 >= clean.height) continue;
-										uTotal2++;
-										if (clean.data[(by82 * clean.width + bx82) * 4] > 200) uMatch2++;
-									}
-										if (uTotal2 >= 4 && uMatch2 / uTotal2 >= 0.75) {
-										is8 = true;
+							}
+							// Situation 1b: dots + digit + dots — only when font1 found nothing (prevents debuff false positives)
+							var dp2 = (joinedLen === 0) ? raw.match(/^\.{2,3}(\d)\.{1,3}$/) : null;
+							if (dp2) {
+								var pl2 = "(" + dp2[1] + ")";
+								// Isolate buffer: grayscale with contrast stretch — use pixelOffset for correct pixel access
+								var ld: string | null = null;
+								var isoData = new ImageData(buffer.width, buffer.height);
+								for (var iy = 0; iy < buffer.height; iy++) {
+									for (var ix = 0; ix < buffer.width; ix++) {
+										var srcI = buffer.pixelOffset(ix, iy);
+										var dstI = (iy * buffer.width + ix) * 4;
+										var iAvg = (buffer.data[srcI] + buffer.data[srcI+1] + buffer.data[srcI+2]) / 3;
+										var iVal = iAvg > 200 ? 255 : (iAvg < 80 ? 0 : Math.round((iAvg - 80) * 255 / 120));
+										isoData.data[dstI] = isoData.data[dstI+1] = isoData.data[dstI+2] = iVal;
+										isoData.data[dstI+3] = 255;
 									}
 								}
-								text = text.slice(0, -1) + (is8 ? "8" : "3");
-								found3 = true;
+								// Scan isolated buffer for leading digit — only at x=ox to ox+3 (before the parens area)
+								var isoFonts = [font, font2, fontLow];
+								for (var liy = boy - 4; liy <= boy && !ld; liy++) {
+									if (liy < 0) { continue; }
+									for (var ldx = 0; ldx <= 3 && !ld; ldx++) {
+										for (var lfi = 0; lfi < isoFonts.length && !ld; lfi++) {
+											var lr = OCR.readLine(isoData, isoFonts[lfi], [255, 255, 255], ox + ldx, liy, true);
+											if (lr.text && /^\d$/.test(lr.text)) {
+												ld = lr.text;
+											}
+										}
+									}
+								}
+								// Pixel-level digit detection: check text pixel pattern at (ox, boy-2..boy-1)
+								if (!ld) {
+									var textPat: string[] = [];
+									for (var ppy = boy - 2; ppy <= boy - 1; ppy++) {
+										var pr = "";
+										for (var ppx = ox; ppx < ox + 6 && ppx < buffer.width; ppx++) {
+											if (ppy < 0 || ppy >= buffer.height) { pr += "0"; continue; }
+											var ppi = buffer.pixelOffset(ppx, ppy);
+											var ppR = buffer.data[ppi], ppG = buffer.data[ppi+1], ppB = buffer.data[ppi+2];
+											var ppLum = (ppR + ppG + ppB) / 3;
+											var ppMax = Math.max(ppR, ppG, ppB), ppMin = Math.min(ppR, ppG, ppB);
+											var ppSat = ppMax > 0 ? ((ppMax - ppMin) / ppMax) * 255 : 0;
+											pr += (ppLum > 140 && ppSat < 60) ? "1" : "0";
+										}
+										textPat.push(pr);
+									}
+									// "6" pattern: top row has text-gap-text (T?.Tx), bottom has .TTT.
+									if (textPat.length === 2 && textPat[0][0] === "1" && textPat[0][2] === "0" && textPat[0][3] === "1" &&
+										textPat[1][0] === "0" && textPat[1][1] === "1" && textPat[1][2] === "1" && textPat[1][3] === "1") {
+										ld = "6";
+									}
+								}
+								if (!ld) { ld = BuffReader.bestDigit(isoData, ox, boy, "1"); }
+								if (ld) { pl2 = ld + pl2; }
+								if (pl2.length >= bestParenLine.length) { bestParenLine = pl2; bestParenY = boy; }
+							}
+						}
+						} // bfi
+					}
+				}
+			}
+
+			// If parens found, determine timer line
+			if (bestParenLine && /^\d?\(\d+\)$/.test(bestParenLine)) {
+				botC = bestParenLine;
+				parenFound = true;
+				// Situation 2: parens start with "(" — timer is on line above
+				if (bestParenLine[0] === "(") {
+					// Scan around bestParenY - 10 for timer
+					for (var tci = 0; tci < botColors.length; tci++) {
+						for (var toy = bestParenY - 12; toy <= bestParenY - 8; toy++) {
+							if (toy < 0) { continue; }
+							var tr = OCR.readLine(buffer, font2, botColors[tci], ox, toy, true);
+							if (tr.text && tr.text.length > topT.length) { topT = tr.text; }
+						}
+					}
+					topT = topT.replace(/[^0-9mhrK%]/g, "");
+					// False-1 correction
+					if (topT.length >= 1 && topT[0] === "1") {
+						var bd = BuffReader.bestDigit(buffer, ox, bestParenY - 10, "1");
+						if (bd) { topT = bd + topT.substring(1); }
+					}
+				}
+			} else {
+				// No parens found — clean botC for fallback, scan top for timer
+				botC = botC.replace(/[^0-9mhrK%()]/g, "");
+				if (/^\d?\(\d/.test(botC) && botC.indexOf(")") === -1) { botC += ")"; }
+				for (var tci = 0; tci < botColors.length; tci++) {
+					for (var toy = oy - 20; toy <= oy - 5; toy++) {
+						if (toy < 0) { continue; }
+						var tr = OCR.readLine(buffer, font2, botColors[tci], ox, toy, true);
+						if (tr.text && tr.text.length > topT.length) { topT = tr.text; }
+					}
+				}
+				topT = topT.replace(/[^0-9mhrK%]/g, "");
+
+				// Grayscale fallback: try to find "(" on grayscale buffer
+				if (lines.join("").length <= 1 && botC.indexOf("(") === -1) {
+					var grayData = new ImageData(buffer.width, buffer.height);
+					for (var gi = 0; gi < buffer.data.length; gi += 4) {
+						var avg = (buffer.data[gi] + buffer.data[gi + 1] + buffer.data[gi + 2]) / 3;
+						grayData.data[gi] = grayData.data[gi + 1] = grayData.data[gi + 2] = avg;
+						grayData.data[gi + 3] = buffer.data[gi + 3];
+					}
+					var grayBotC = "";
+					for (var gboy = 0; gboy <= oy + 5; gboy++) {
+						var gbr = OCR.readLine(grayData, font2, [255, 255, 255], ox, gboy, true);
+						if (gbr.text && gbr.text.length > grayBotC.length) { grayBotC = gbr.text; }
+						gbr = OCR.readLine(grayData, font, [255, 255, 255], ox, gboy, true);
+						if (gbr.text && gbr.text.length > grayBotC.length) { grayBotC = gbr.text; }
+					}
+					grayBotC = grayBotC.replace(/[^0-9mhrK%()]/g, "");
+					var gpIdx = grayBotC.indexOf("(");
+					if (gpIdx !== -1) {
+						var gBefore = grayBotC.substring(0, gpIdx);
+						var gAfter = grayBotC.substring(gpIdx + 1).replace(/\).*$/, "");
+						if (/^\d{0,2}$/.test(gBefore) && /^\d{0,1}$/.test(gAfter)) {
+							if (gAfter.length === 0) {
+								for (var gcx = ox + 3; gcx <= ox + 15; gcx++) {
+									var gc = OCR.readChar(grayData, font2, [255, 255, 255], gcx, oy, true);
+									if (gc && /[0-9]/.test(gc.chr)) { gAfter = gc.chr; break; }
+									gc = OCR.readChar(grayData, font, [255, 255, 255], gcx, oy, true);
+									if (gc && /[0-9]/.test(gc.chr)) { gAfter = gc.chr; break; }
+								}
+							}
+							if (gAfter.length > 0) {
+								botC = gBefore + "(" + gAfter + ")";
+								parenFound = true;
 							}
 						}
 					}
 				}
 			}
 
-
-			if (text) { lines.push(text); }
+			// Override: apply parens result
+			if (parenFound && /^\d?\(\d+\)$/.test(botC)) {
+				lines = [];
+				if (topT) { lines.push(topT); }
+				lines.push(botC);
+			} else {
+				if (lines.length === 0 && topT) { lines.push(topT); }
+			}
 		}
 
 		var r = { time: 0, arg: "" };
 		if (type == "timearg" && lines.length > 1) { r.arg = lines.pop()!; }
 		var str = lines.join("");
-		// Bright icon cleanup: strip dots and non-digit chars when no suffix or topology conversion.
-		// Shadow-mask cleaning is the primary noise defense; this just strips stray non-digits.
-		if (bright && !topoConverted && !/[mK%]/.test(str) && !/hr/.test(str)) {
-			str = str.replace(/[^0-9]/g, '');
+		if (type == "arg") { r.arg = str; }
+		else {
+			var m;
+			if (m = str.match(/^(\d+)hr($|\s?\()/i)) { r.time = +m[1] * 60 * 60; }
+			else if (m = str.match(/^(\d+)m($|\s?\()/i)) { r.time = +m[1] * 60; }
+			else if (m = str.match(/^(\d+)($|\s?\()/)) { r.time = +m[1]; }
 		}
-		// Clean up: decimal timers are always X.Y (1 digit after dot)
-		str = str.replace(/^(\d+\.\d)\d*$/, '$1');
-		// Clean up: "h" is only valid in "hr" pattern — strip standalone "h"
-		str = str.replace(/h(?!r)/g, '');
-		// Clean up: strip leading non-digits (false matches before the number)
-		str = str.replace(/^[^0-9]+/, '');
-		// Clean up: remove trailing false matches after valid patterns
-		str = str.replace(/^(\d+[mhrK%]).*$/, '$1');
-		// Clean up: strip trailing non-digit non-suffix chars
-		str = str.replace(/^(\d+(?:\.\d)?(?:m|hr|K|%)?).*$/, '$1');
-		// Fix "m" misread as digit: XX.Y or XXX.Y → XXm/XXXm
-		// Valid decimal timers are always X.Y (single digit before dot), never 2+ digits
-		if (/^\d{2,3}\.\d$/.test(str)) {
-			str = str.replace(/\.\d$/, "m");
+
+		// Decimal detection (X.Y debuff timers)
+		if (str.length === 1 && /\d/.test(str)) {
+			var baseEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
+			for (var dotOff = 3; dotOff <= 6; dotOff++) {
+				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX + dotOff, oy, true);
+				if (dotResult.text && /^\d$/.test(dotResult.text)) {
+					str = str + "." + dotResult.text;
+					r.arg = str;
+					break;
+				}
+			}
 		}
-		// Fix "m" misread as digit: 3 bare digits → XXm
-		// Buff values never show 3-digit integers without a suffix
-		if (/^\d{3}$/.test(str)) {
-			str = str.slice(0, 2) + "m";
+
+		// Second canblend pass - extend 1-2 digit readings
+		if (str.length >= 1 && str.length <= 2 && /^\d+$/.test(str)) {
+			// Use firstResult's xend if available (correct position when text found at different y)
+			var endX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + str.length * 7;
+			var secondPassY = oy;
+			if (firstResult && firstResult.fragments && firstResult.fragments.length > 0) {
+				endX = firstResult.fragments[firstResult.fragments.length - 1].xend;
+				secondPassY = firstResultY;
+			}
+			var suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, true);
+			if (!suffix.text) { suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, false); }
+			// For single digit, try x/y offsets with both fonts (handles "1" truncation + y-shifted text)
+			if (str.length === 1 && !suffix.text) {
+				for (var soff = 0; soff <= 2 && !suffix.text; soff++) {
+					for (var syoff = 0; syoff <= 2 && !suffix.text; syoff++) {
+						if (soff === 0 && syoff === 0) { continue; }
+						suffix = OCR.readLine(buffer, font, [255, 255, 255], endX + soff, secondPassY - syoff, true);
+						if (!suffix.text) {
+							var sf2 = OCR.readLine(buffer, font2, [255, 255, 255], endX + soff, secondPassY - syoff, true);
+							if (sf2.text && /^[0-9]/.test(sf2.text)) {
+								var f2d = sf2.text.match(/^[0-9]+/);
+								if (f2d) { suffix = { text: f2d[0], fragments: sf2.fragments, debugArea: sf2.debugArea }; }
+							}
+						}
+					}
+				}
+			}
+			if (suffix.text) {
+				if (str.length === 2) {
+					if (/^[mhrK%]/.test(suffix.text)) { str = str + suffix.text.charAt(0); r.arg = str; }
+				} else {
+					str = str + suffix.text; r.arg = str;
+				}
+			}
+			// Trailing-1 recovery: try offsets when str ends with "1"
+			if (str.endsWith("1") && /^\d+$/.test(str)) {
+				for (var roff = 2; roff >= 0; roff--) {
+					var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, oy, true);
+					if (rr.text && rr.text.length >= 1 && rr.text.trim() === rr.text && rr.text !== "1") {
+						str = str + rr.text; r.arg = str; break;
+					}
+				}
+			}
 		}
-		if (type == "arg") {
-			r.arg = str;
-		} else {
-			var rmatch;
-			if (rmatch = str.match(/^(\d+)hr/i)) { r.time = +rmatch[1] * 60 * 60; }
-			else if (rmatch = str.match(/^(\d+)m/i)) { r.time = +rmatch[1] * 60; }
-			else if (rmatch = str.match(/^(\d+\.\d+)/)) { r.time = +rmatch[1]; }
-			else if (rmatch = str.match(/^(\d+)/)) { r.time = +rmatch[1]; }
+
+		// Stacked buff parens: if timer was found on upper line, scan for parens on lower line near oy
+		if (/^\d+$/.test(str) && str.length >= 1 && firstResult && firstResultY < oy) {
+			var spFound = false;
+			// Method 1: font2 on raw buffer with dot pattern
+			for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
+				if (pry < 0 || pry >= buffer.height) { continue; }
+				for (var prx = -1; prx <= 1 && !spFound; prx++) {
+					for (var prcb = 0; prcb < 2 && !spFound; prcb++) {
+						var prr = OCR.readLine(buffer, font2, [255, 255, 255], ox + prx, pry, prcb === 0);
+						if (prr.text) {
+							var prRaw = prr.text.replace(/ /g, "");
+							var prDp = prRaw.match(/^\.{1,3}(\d)\.{1,3}$/);
+							if (prDp) { str = str + "(" + prDp[1] + ")"; r.arg = str; spFound = true; }
+						}
+					}
+				}
+			}
+			// Create isolated buffer for methods 2-3
+			var spIso = new ImageData(buffer.width, buffer.height);
+			if (!spFound) {
+				for (var siy = 0; siy < buffer.height; siy++) {
+					for (var six = 0; six < buffer.width; six++) {
+						var siSrc = buffer.pixelOffset(six, siy);
+						var siDst = (siy * buffer.width + six) * 4;
+						var siAvg = (buffer.data[siSrc] + buffer.data[siSrc+1] + buffer.data[siSrc+2]) / 3;
+						var siVal = siAvg > 200 ? 255 : (siAvg < 80 ? 0 : Math.round((siAvg - 80) * 255 / 120));
+						spIso.data[siDst] = spIso.data[siDst+1] = spIso.data[siDst+2] = siVal;
+						spIso.data[siDst+3] = 255;
+					}
+				}
+				var spFonts = [font2, font, fontLow];
+				for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
+					for (var prx = -1; prx <= 1 && !spFound; prx++) {
+						for (var spfi = 0; spfi < spFonts.length && !spFound; spfi++) {
+							var srl = OCR.readLine(spIso, spFonts[spfi], [255, 255, 255], ox + prx, pry, true);
+							if (srl.text) {
+								var src2 = srl.text.replace(/[^0-9()]/g, "");
+								if (/\(\d\)/.test(src2)) {
+									var srm = src2.match(/\((\d)\)/);
+									if (srm) {
+										str = str + "(" + srm[1] + ")"; r.arg = str; spFound = true;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			// Method 3: pixel-level white cluster detection on iso buffer
+			if (!spFound) {
+				for (var wpy = oy - 3; wpy <= oy + 2 && !spFound; wpy++) {
+					if (wpy < 0 || wpy >= buffer.height) { continue; }
+					var wStart = -1;
+					var wCount = 0;
+					for (var wpx = ox + 3; wpx < ox + 25 && !spFound; wpx++) {
+						if (wpx >= buffer.width) { break; }
+						var wpi = buffer.pixelOffset(wpx, wpy);
+						var wR = buffer.data[wpi], wG = buffer.data[wpi+1], wB = buffer.data[wpi+2];
+						if (wR > 230 && wG > 230 && wB > 230) {
+							if (wStart === -1) { wStart = wpx; }
+							wCount++;
+						} else {
+							if (wCount >= 3 && wStart > ox + 2) {
+								// Bright cluster found — try readChar on iso buffer for the digit
+								// Read the shadow line BELOW the cluster to identify the digit
+								var wDigit = "";
+								if (wpy + 1 < buffer.height) {
+									// Build shadow pattern at y+1 (dark pixels = shadow of text above)
+									var wShadow = "";
+									for (var wpx2 = wStart - 1; wpx2 < wStart + wCount + 2 && wpx2 < buffer.width; wpx2++) {
+										if (wpx2 < 0) { wShadow += "0"; continue; }
+										var wsi = buffer.pixelOffset(wpx2, wpy + 1);
+										var wsl = (buffer.data[wsi] + buffer.data[wsi+1] + buffer.data[wsi+2]) / 3;
+										wShadow += wsl < 50 ? "1" : "0";
+									}
+									// Try readLine on raw buffer at the shadow row
+									var srl = OCR.readLine(buffer, font2, [255, 255, 255], wStart, wpy + 1, true);
+									// Also try bestDigit at y+1 (shadow position)
+									var sbd = BuffReader.bestDigit(buffer, wStart, wpy + 1, "17");
+									if (sbd) { wDigit = sbd; }
+								}
+								if (!wDigit) {
+									var wbd = BuffReader.bestDigit(spIso, wStart, wpy, "17");
+									if (!wbd) { wbd = BuffReader.bestDigit(buffer, wStart, wpy, "17"); }
+									wDigit = wbd || "";
+								}
+								if (wDigit) {
+									str = str + "(" + wDigit + ")";
+									r.arg = str;
+									spFound = true;
+								}
+							}
+							wStart = -1;
+							wCount = 0;
+						}
+					}
+				}
+			}
+			// Method 4: grayscale scan for "(" near oy
+			if (!spFound) {
+				var grayData = new ImageData(buffer.width, buffer.height);
+				for (var gi = 0; gi < buffer.data.length; gi += 4) {
+					var avg = (buffer.data[gi] + buffer.data[gi + 1] + buffer.data[gi + 2]) / 3;
+					grayData.data[gi] = grayData.data[gi + 1] = grayData.data[gi + 2] = avg;
+					grayData.data[gi + 3] = buffer.data[gi + 3];
+				}
+				for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
+					for (var prx = -1; prx <= 1 && !spFound; prx++) {
+						var grl = OCR.readLine(grayData, font2, [255, 255, 255], ox + prx, pry, true);
+						if (grl.text) {
+							var spc = grl.text.replace(/[^0-9()]/g, "");
+							if (/^\d?\(\d\)$/.test(spc)) { str = str + spc.replace(/^\d/, ""); r.arg = str; spFound = true; }
+							var spRaw = grl.text.replace(/ /g, "");
+							var spDp = spRaw.match(/^\.{1,3}(\d)\.{1,3}$/);
+							if (spDp) { str = str + "(" + spDp[1] + ")"; r.arg = str; spFound = true; }
+						}
+						grl = OCR.readLine(grayData, font, [255, 255, 255], ox + prx, pry, true);
+						if (grl.text) {
+							var spc2 = grl.text.replace(/[^0-9()]/g, "");
+							if (/^\d?\(\d\)$/.test(spc2)) { str = str + spc2.replace(/^\d/, ""); r.arg = str; spFound = true; }
+						}
+					}
+				}
+			}
 		}
+
+		// "m" suffix detection via stroke groups
+		if (/^\d+$/.test(str) && str.length >= 1) {
+			var endpointX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + str.length * 7;
+			var strokeGroups = 0;
+			var inBright = false;
+			var firstBrightCol = -1;
+			var brightColCount = 0;
+			for (var sc = 0; sc < 14; sc++) {
+				var sx = endpointX + sc;
+				if (sx >= buffer.width) { break; }
+				var hasBright = false;
+				for (var sy = oy - 2; sy <= oy + 8; sy++) {
+					if (sy < 0 || sy >= buffer.height) { continue; }
+					var si = buffer.pixelOffset(sx, sy);
+					var sR = buffer.data[si], sG = buffer.data[si + 1], sB = buffer.data[si + 2];
+					var sLum = (sR + sG + sB) / 3;
+					var sMax = Math.max(sR, sG, sB);
+					var sMin = Math.min(sR, sG, sB);
+					var sSat = sMax > 0 ? ((sMax - sMin) / sMax) * 255 : 0;
+					if (sLum > 150 && sSat < 40) { hasBright = true; break; }
+				}
+				if (hasBright) {
+					brightColCount++;
+					if (firstBrightCol === -1) { firstBrightCol = sc; }
+					if (!inBright) { strokeGroups++; inBright = true; }
+				} else { inBright = false; }
+			}
+
+			// Bright icon check for single digits (prevent false "m" on stack counts)
+			var isBrightIcon = false;
+			if (str.length === 1) {
+				var brightPixCount = 0;
+				for (var biy = oy - 20; biy < oy - 5; biy++) {
+					for (var bix = ox; bix < ox + 25; bix++) {
+						if (bix < 0 || biy < 0 || bix >= buffer.width || biy >= buffer.height) { continue; }
+						var bii = buffer.pixelOffset(bix, biy);
+						var biR = buffer.data[bii], biG = buffer.data[bii + 1], biB = buffer.data[bii + 2];
+						var biLum = (biR + biG + biB) / 3;
+						var biMax = Math.max(biR, biG, biB);
+						var biMin = Math.min(biR, biG, biB);
+						var biSat = biMax > 0 ? ((biMax - biMin) / biMax) * 255 : 0;
+						if (biLum > 150 && biSat < 40) { brightPixCount++; }
+					}
+				}
+				if (brightPixCount > 60) { isBrightIcon = true; }
+			}
+
+			var isMinuteTimer = str.length >= 3 || (str.length === 2 && parseInt(str) >= 20);
+			var mThreshold = isMinuteTimer ? 2 : 3;
+			if (strokeGroups >= mThreshold && !isBrightIcon) { str = str + "m"; r.arg = str; }
+
+			// Gap digit recovery: if 2-digit + firstBrightCol >= 2
+			if (str.length === 2 && /^\d{2}$/.test(str) && firstBrightCol >= 2) {
+				for (var gd = 0; gd < firstBrightCol; gd++) {
+					var gc1 = OCR.readChar(buffer, font, [255, 255, 255], endpointX + gd, oy, true);
+					if (gc1 && /[2-9]/.test(gc1.chr)) { str = str + gc1.chr; r.arg = str; break; }
+				}
+			}
+		}
+
+		// "%" suffix detection
+		if (/^\d{2}$/.test(str)) {
+			var pctEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 14;
+			var brightPctPix = 0;
+			for (var py = oy - 2; py <= oy + 8; py++) {
+				for (var px = pctEndX; px < pctEndX + 10; px++) {
+					if (px < 0 || py < 0 || px >= buffer.width || py >= buffer.height) { continue; }
+					var pi = buffer.pixelOffset(px, py);
+					var pR = buffer.data[pi], pG = buffer.data[pi + 1], pB = buffer.data[pi + 2];
+					var pLum = (pR + pG + pB) / 3;
+					var pMax = Math.max(pR, pG, pB);
+					var pMin = Math.min(pR, pG, pB);
+					var pSat = pMax > 0 ? ((pMax - pMin) / pMax) * 255 : 0;
+					if (pLum > 150 && pSat < 40) { brightPctPix++; }
+				}
+			}
+			if (brightPctPix >= 80) { str = str + "%"; r.arg = str; }
+		}
+
+		if (type === "arg") { r.arg = str; }
 		return r;
 	}
 
-	static readTime(buffer: ImageData, ox: number, oy: number, scale = 1.0) {
-		return this.readArg(buffer, ox, oy, "time", scale).time;
+	private static bestDigit(buffer: ImageData, ox: number, oy: number, exclude: string): string | null {
+		var best: { chr: string, sizescore: number } | null = null;
+		var fonts = [font2, font, fontLow];
+		for (var fi = 0; fi < fonts.length; fi++) {
+			for (var ddx = 0; ddx <= 6; ddx++) {
+				for (var ddy = -2; ddy <= 2; ddy++) {
+					for (var cb = 0; cb < 2; cb++) {
+						var rc = OCR.readChar(buffer, fonts[fi], [255, 255, 255], ox + ddx, oy + ddy, cb === 0);
+						if (rc && /[0-9]/.test(rc.chr) && exclude.indexOf(rc.chr) === -1) {
+							if (!best || rc.sizescore > best.sizescore) {
+								best = { chr: rc.chr, sizescore: rc.sizescore };
+							}
+						}
+					}
+				}
+			}
+		}
+		return best ? best.chr : null;
+	}
+
+	static readTime(buffer: ImageData, ox: number, oy: number) {
+		return this.readArg(buffer, ox, oy, "time").time;
 	}
 
 	static matchBuff(state: Buff[], buffimg: ImageData) {
@@ -1196,10 +758,10 @@ export default class BuffReader {
 	}
 
 	static matchBuffMulti(state: Buff[], buffinfo: BuffInfo) {
-		if (buffinfo.final) {
+		if (buffinfo.final) {//cheap way if we known exactly what we're searching for
 			return BuffReader.matchBuff(state, buffinfo.imgdata);
 		}
-		else {
+		else {//expensive way if we are not sure the template is final
 			var bestindex = -1;
 			var bestscore = 0;
 			if (buffinfo.imgdata) {
@@ -1213,6 +775,7 @@ export default class BuffReader {
 			}
 			if (bestscore < 50) { return null; }
 
+			//update the isolated buff
 			if (buffinfo.canimprove) {
 				BuffReader.isolateBuffer(state[bestindex].buffer, state[bestindex].bufferx + 1, state[bestindex].buffery + 1, buffinfo.imgdata);
 			}
