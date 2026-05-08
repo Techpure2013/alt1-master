@@ -12,7 +12,6 @@ var imgs = webpackImages({
 
 var font = require("../fonts/aa_8px_new.fontmeta.json");
 var font2 = require("../fonts/aa_8px_buff2.fontmeta.json");
-var fontLow = require("../fonts/aa_8px_buff2_low.fontmeta.json");
 
 function negmod(a: number, b: number) {
 	return ((a % b) + b) % b;
@@ -218,74 +217,40 @@ export default class BuffReader {
 		var lines: string[] = [];
 		var firstResult: any = null;
 		var firstResultY = oy;
-		// Initial scan: dy=-10 (second line) and dy=0 (main line)
-		for (var dy = -10; dy < 10; dy += 10) {
-			var result = OCR.readLine(buffer, font, [255, 255, 255], ox, oy + dy, true);
-			if (result.text) {
-				if (!firstResult) { firstResult = result; firstResultY = oy + dy; }
-				lines.push(result.text);
-			}
-		}
-		// Fallback: oy-2 (old UI text position)
-		if (lines.length === 0) {
+		// Initial scan + oy-2 fallback
+		for (var oyOff = 0; oyOff <= 2 && lines.length === 0; oyOff += 2) {
 			for (var dy = -10; dy < 10; dy += 10) {
-				var result = OCR.readLine(buffer, font, [255, 255, 255], ox, oy - 2 + dy, true);
+				var result = OCR.readLine(buffer, font, [255, 255, 255], ox, oy - oyOff + dy, true);
 				if (result.text) {
-					if (!firstResult) { firstResult = result; firstResultY = oy - 2 + dy; }
+					if (!firstResult) { firstResult = result; firstResultY = oy - oyOff + dy; }
 					lines.push(result.text);
 				}
 			}
-			if (lines.length > 0) { oy = oy - 2; }
+			if (oyOff > 0 && lines.length > 0) { oy -= oyOff; }
 		}
-
-		// Font1 retry system (dy=0 only)
+		// Font1 retry with canBlend at offsets
 		if (lines.length === 0) {
-			var colors: ColortTriplet[] = [[255, 255, 255], [210, 210, 210]];
-			for (var ci = 0; ci < colors.length && lines.length === 0; ci++) {
-				for (var ddy = -2; ddy <= 2 && lines.length === 0; ddy++) {
-					for (var ddx = 0; ddx <= 3 && lines.length === 0; ddx++) {
-						var retryResult = OCR.readLine(buffer, font, colors[ci], ox + ddx, oy + ddy, true);
-						if (retryResult.text) { lines.push(retryResult.text); }
-					}
-				}
-			}
-			// Last resort: backward at limited offsets
-			if (lines.length === 0) {
-				for (var ddy = -2; ddy <= 2 && lines.length === 0; ddy++) {
-					for (var ddx = 0; ddx <= 1 && lines.length === 0; ddx++) {
-						var retryResult = OCR.readLine(buffer, font, [255, 255, 255], ox + ddx, oy + ddy, true, true);
-						if (retryResult.text && retryResult.text.trim() === retryResult.text) {
-							lines.push(retryResult.text);
-						}
-					}
+			for (var ddy = -2; ddy <= 2 && lines.length === 0; ddy++) {
+				for (var ddx = 0; ddx <= 3 && lines.length === 0; ddx++) {
+					var rr = OCR.readLine(buffer, font, [255, 255, 255], ox + ddx, oy + ddy, true);
+					if (rr.text) { lines.push(rr.text); }
 				}
 			}
 		}
-
 		// Cache baseLine for reuse in decimal/second pass/m-detection/%
 		var baseLine = OCR.readLine(buffer, font, [255, 255, 255], ox, oy, true);
-
 		// Font2 system - only when font1 found <=1 char
 		var joinedLen = lines.join("").length;
 		if (joinedLen <= 1) {
-			var botC = "";
-			var botCY = -1;
-			var topT = "";
-			var parenFound = false;
+			var botC = "", topT = "", bestParenLine = "", bestParenY = -1;
 			var botColors: ColortTriplet[] = [[255, 255, 255], [210, 210, 210], [255, 255, 0], [255, 152, 31]];
-
-			// Scan entire buff with font2 — check each result for parens
-			var bestParenLine = "";
-			var bestParenY = -1;
 			for (var bci = 0; bci < botColors.length; bci++) {
 				for (var boy = 0; boy <= oy + 5; boy++) {
 					for (var bcb = 0; bcb < 2; bcb++) {
-						// Try font2 and fontLow (low threshold, no shadow, has "()" chars)
-						for (var bfi = 0; bfi < 2; bfi++) {
-						var br = OCR.readLine(buffer, bfi === 0 ? font2 : fontLow, botColors[bci], ox, boy, bcb === 0);
+						var br = OCR.readLine(buffer, font2, botColors[bci], ox, boy, bcb === 0);
 						if (!br.text) { continue; }
 						// Keep longest overall for fallback
-						if (br.text.length > botC.length) { botC = br.text; botCY = boy; }
+						if (br.text.length > botC.length) { botC = br.text; }
 						// Check for direct parens in cleaned text (only when font1 found nothing)
 						var cleaned = br.text.replace(/[^0-9mhrK%()]/g, "");
 						if (joinedLen === 0 && /^\d?\(\d/.test(cleaned) && cleaned.length > bestParenLine.length) {
@@ -293,153 +258,41 @@ export default class BuffReader {
 							bestParenLine = cleaned;
 							bestParenY = boy;
 						}
-						// Check for dot pattern (font2 reads "(" as ".")
-						var raw = br.text.replace(/ /g, "");
-						if (raw.length >= 4 && raw.length <= 9) {
-							// Situation 1: digit + dots + digit + dots — only when font1 found nothing (prevents debuff false positives)
-							if (joinedLen === 0) {
-								var dp1 = raw.match(/^(\d)\.{1,3}(\d)\.{1,3}$/);
-								if (dp1) {
-									var pl = dp1[1] + "(" + dp1[2] + ")";
-									if (pl.length > bestParenLine.length) { bestParenLine = pl; bestParenY = boy; }
-								}
-							}
-							// Situation 1b: dots + digit + dots — only when font1 found nothing (prevents debuff false positives)
-							var dp2 = (joinedLen === 0) ? raw.match(/^\.{2,3}(\d)\.{1,3}$/) : null;
+						// Dot pattern: font2 reads "(" as "." — convert back
+						if (joinedLen === 0) {
+							var raw = br.text.replace(/ /g, "");
+							var dp2 = (raw.length >= 4 && raw.length <= 9) ? raw.match(/^\.{2,3}(\d)\.{1,3}$/) : null;
 							if (dp2) {
 								var pl2 = "(" + dp2[1] + ")";
-								// Isolate buffer: grayscale with contrast stretch — use pixelOffset for correct pixel access
-								var ld: string | null = null;
-								var isoData = new ImageData(buffer.width, buffer.height);
-								for (var iy = 0; iy < buffer.height; iy++) {
-									for (var ix = 0; ix < buffer.width; ix++) {
-										var srcI = buffer.pixelOffset(ix, iy);
-										var dstI = (iy * buffer.width + ix) * 4;
-										var iAvg = (buffer.data[srcI] + buffer.data[srcI+1] + buffer.data[srcI+2]) / 3;
-										var iVal = iAvg > 200 ? 255 : (iAvg < 80 ? 0 : Math.round((iAvg - 80) * 255 / 120));
-										isoData.data[dstI] = isoData.data[dstI+1] = isoData.data[dstI+2] = iVal;
-										isoData.data[dstI+3] = 255;
+								for (var ldy = -2; ldy <= 0 && pl2[0] === "("; ldy++)
+									for (var ldx2 = -1; ldx2 <= 1 && pl2[0] === "("; ldx2++) {
+										var lr = OCR.readLine(buffer, font2, [255, 255, 255], ox + ldx2, boy + ldy, true);
+										if (lr.text) { var lrc = lr.text.replace(/[^0-9()]/g, ""); if (/^\d\(/.test(lrc)) { pl2 = lrc[0] + pl2; } }
 									}
-								}
-								// Scan isolated buffer for leading digit — only at x=ox to ox+3 (before the parens area)
-								var isoFonts = [font, font2, fontLow];
-								for (var liy = boy - 4; liy <= boy && !ld; liy++) {
-									if (liy < 0) { continue; }
-									for (var ldx = 0; ldx <= 3 && !ld; ldx++) {
-										for (var lfi = 0; lfi < isoFonts.length && !ld; lfi++) {
-											var lr = OCR.readLine(isoData, isoFonts[lfi], [255, 255, 255], ox + ldx, liy, true);
-											if (lr.text && /^\d$/.test(lr.text)) {
-												ld = lr.text;
-											}
-										}
-									}
-								}
-								// Pixel-level digit detection: check text pixel pattern at (ox, boy-2..boy-1)
-								if (!ld) {
-									var textPat: string[] = [];
-									for (var ppy = boy - 2; ppy <= boy - 1; ppy++) {
-										var pr = "";
-										for (var ppx = ox; ppx < ox + 6 && ppx < buffer.width; ppx++) {
-											if (ppy < 0 || ppy >= buffer.height) { pr += "0"; continue; }
-											var ppi = buffer.pixelOffset(ppx, ppy);
-											var ppR = buffer.data[ppi], ppG = buffer.data[ppi+1], ppB = buffer.data[ppi+2];
-											var ppLum = (ppR + ppG + ppB) / 3;
-											var ppMax = Math.max(ppR, ppG, ppB), ppMin = Math.min(ppR, ppG, ppB);
-											var ppSat = ppMax > 0 ? ((ppMax - ppMin) / ppMax) * 255 : 0;
-											pr += (ppLum > 140 && ppSat < 60) ? "1" : "0";
-										}
-										textPat.push(pr);
-									}
-									// "6" pattern: top row has text-gap-text (T?.Tx), bottom has .TTT.
-									if (textPat.length === 2 && textPat[0][0] === "1" && textPat[0][2] === "0" && textPat[0][3] === "1" &&
-										textPat[1][0] === "0" && textPat[1][1] === "1" && textPat[1][2] === "1" && textPat[1][3] === "1") {
-										ld = "6";
-									}
-								}
-								if (!ld) { ld = BuffReader.bestDigit(isoData, ox, boy, "1"); }
-								if (ld) { pl2 = ld + pl2; }
 								if (pl2.length >= bestParenLine.length) { bestParenLine = pl2; bestParenY = boy; }
 							}
 						}
-						} // bfi
 					}
 				}
 			}
-
-			// If parens found, determine timer line
-			if (bestParenLine && /^\d?\(\d+\)$/.test(bestParenLine)) {
-				botC = bestParenLine;
-				parenFound = true;
-				// Situation 2: parens start with "(" — timer is on line above
-				if (bestParenLine[0] === "(") {
-					// Scan around bestParenY - 10 for timer
-					for (var tci = 0; tci < botColors.length; tci++) {
-						for (var toy = bestParenY - 12; toy <= bestParenY - 8; toy++) {
-							if (toy < 0) { continue; }
-							var tr = OCR.readLine(buffer, font2, botColors[tci], ox, toy, true);
-							if (tr.text && tr.text.length > topT.length) { topT = tr.text; }
-						}
-					}
-					topT = topT.replace(/[^0-9mhrK%]/g, "");
-					// False-1 correction
-					if (topT.length >= 1 && topT[0] === "1") {
-						var bd = BuffReader.bestDigit(buffer, ox, bestParenY - 10, "1");
-						if (bd) { topT = bd + topT.substring(1); }
-					}
-				}
-			} else {
-				// No parens found — clean botC for fallback, scan top for timer
+			// Determine timer line — scan top area with font2
+			var validParens = bestParenLine && /^\d?\(\d+\)$/.test(bestParenLine);
+			if (validParens) { botC = bestParenLine; }
+			else {
 				botC = botC.replace(/[^0-9mhrK%()]/g, "");
 				if (/^\d?\(\d/.test(botC) && botC.indexOf(")") === -1) { botC += ")"; }
-				for (var tci = 0; tci < botColors.length; tci++) {
-					for (var toy = oy - 20; toy <= oy - 5; toy++) {
-						if (toy < 0) { continue; }
-						var tr = OCR.readLine(buffer, font2, botColors[tci], ox, toy, true);
-						if (tr.text && tr.text.length > topT.length) { topT = tr.text; }
-					}
-				}
-				topT = topT.replace(/[^0-9mhrK%]/g, "");
-
-				// Grayscale fallback: try to find "(" on grayscale buffer
-				if (lines.join("").length <= 1 && botC.indexOf("(") === -1) {
-					var grayData = new ImageData(buffer.width, buffer.height);
-					for (var gi = 0; gi < buffer.data.length; gi += 4) {
-						var avg = (buffer.data[gi] + buffer.data[gi + 1] + buffer.data[gi + 2]) / 3;
-						grayData.data[gi] = grayData.data[gi + 1] = grayData.data[gi + 2] = avg;
-						grayData.data[gi + 3] = buffer.data[gi + 3];
-					}
-					var grayBotC = "";
-					for (var gboy = 0; gboy <= oy + 5; gboy++) {
-						var gbr = OCR.readLine(grayData, font2, [255, 255, 255], ox, gboy, true);
-						if (gbr.text && gbr.text.length > grayBotC.length) { grayBotC = gbr.text; }
-						gbr = OCR.readLine(grayData, font, [255, 255, 255], ox, gboy, true);
-						if (gbr.text && gbr.text.length > grayBotC.length) { grayBotC = gbr.text; }
-					}
-					grayBotC = grayBotC.replace(/[^0-9mhrK%()]/g, "");
-					var gpIdx = grayBotC.indexOf("(");
-					if (gpIdx !== -1) {
-						var gBefore = grayBotC.substring(0, gpIdx);
-						var gAfter = grayBotC.substring(gpIdx + 1).replace(/\).*$/, "");
-						if (/^\d{0,2}$/.test(gBefore) && /^\d{0,1}$/.test(gAfter)) {
-							if (gAfter.length === 0) {
-								for (var gcx = ox + 3; gcx <= ox + 15; gcx++) {
-									var gc = OCR.readChar(grayData, font2, [255, 255, 255], gcx, oy, true);
-									if (gc && /[0-9]/.test(gc.chr)) { gAfter = gc.chr; break; }
-									gc = OCR.readChar(grayData, font, [255, 255, 255], gcx, oy, true);
-									if (gc && /[0-9]/.test(gc.chr)) { gAfter = gc.chr; break; }
-								}
-							}
-							if (gAfter.length > 0) {
-								botC = gBefore + "(" + gAfter + ")";
-								parenFound = true;
-							}
-						}
-					}
+			}
+			var topScanMin = validParens && bestParenLine[0] === "(" ? bestParenY - 12 : oy - 20;
+			var topScanMax = validParens && bestParenLine[0] === "(" ? bestParenY - 8 : oy - 5;
+			for (var tci = 0; tci < botColors.length; tci++) {
+				for (var toy = topScanMin; toy <= topScanMax; toy++) {
+					if (toy < 0) { continue; }
+					var tr = OCR.readLine(buffer, font2, botColors[tci], ox, toy, true);
+					if (tr.text && tr.text.length > topT.length) { topT = tr.text; }
 				}
 			}
-
-			// Override: apply parens result
-			if (parenFound && /^\d?\(\d+\)$/.test(botC)) {
+			topT = topT.replace(/[^0-9mhrK%]/g, "");
+			if (validParens) {
 				lines = [];
 				if (topT) { lines.push(topT); }
 				lines.push(botC);
@@ -447,18 +300,15 @@ export default class BuffReader {
 				if (lines.length === 0 && topT) { lines.push(topT); }
 			}
 		}
-
 		var r = { time: 0, arg: "" };
 		if (type == "timearg" && lines.length > 1) { r.arg = lines.pop()!; }
 		var str = lines.join("");
-		if (type == "arg") { r.arg = str; }
-		else {
+		if (type != "arg") {
 			var m;
 			if (m = str.match(/^(\d+)hr($|\s?\()/i)) { r.time = +m[1] * 60 * 60; }
 			else if (m = str.match(/^(\d+)m($|\s?\()/i)) { r.time = +m[1] * 60; }
 			else if (m = str.match(/^(\d+)($|\s?\()/)) { r.time = +m[1]; }
 		}
-
 		// Decimal detection (X.Y debuff timers)
 		if (str.length === 1 && /\d/.test(str)) {
 			var baseEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
@@ -466,243 +316,95 @@ export default class BuffReader {
 				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX + dotOff, oy, true);
 				if (dotResult.text && /^\d$/.test(dotResult.text)) {
 					str = str + "." + dotResult.text;
-					r.arg = str;
 					break;
 				}
 			}
 		}
-
-		// Second canblend pass - extend 1-2 digit readings
+		// Second pass - extend 1-2 digit readings using canBlend
 		if (str.length >= 1 && str.length <= 2 && /^\d+$/.test(str)) {
-			// Use firstResult's xend if available (correct position when text found at different y)
 			var endX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + str.length * 7;
 			var secondPassY = oy;
 			if (firstResult && firstResult.fragments && firstResult.fragments.length > 0) {
 				endX = firstResult.fragments[firstResult.fragments.length - 1].xend;
 				secondPassY = firstResultY;
 			}
-			var suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, true);
-			if (!suffix.text) { suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, false); }
-			// For single digit, try x/y offsets with both fonts (handles "1" truncation + y-shifted text)
-			if (str.length === 1 && !suffix.text) {
-				for (var soff = 0; soff <= 2 && !suffix.text; soff++) {
-					for (var syoff = 0; syoff <= 2 && !suffix.text; syoff++) {
-						if (soff === 0 && syoff === 0) { continue; }
-						suffix = OCR.readLine(buffer, font, [255, 255, 255], endX + soff, secondPassY - syoff, true);
-						if (!suffix.text) {
-							var sf2 = OCR.readLine(buffer, font2, [255, 255, 255], endX + soff, secondPassY - syoff, true);
-							if (sf2.text && /^[0-9]/.test(sf2.text)) {
-								var f2d = sf2.text.match(/^[0-9]+/);
-								if (f2d) { suffix = { text: f2d[0], fragments: sf2.fragments, debugArea: sf2.debugArea }; }
-							}
-						}
-					}
+			// Trailing-1: try offsets to find digit hidden by "1" shadow
+			if (str.endsWith("1")) {
+				for (var roff = 2; roff >= 0; roff--) {
+					var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, true);
+					if (rr.text && rr.text.trim() === rr.text && /^\d/.test(rr.text) && rr.text !== "1") { str += rr.text; break; }
 				}
+			}
+			var suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, true);
+			// For single digit, try offsets with canBlend
+			if (str.length === 1 && !suffix.text) {
+				var sFonts = [font, font2];
+				for (var soff = 0; soff <= 2 && !suffix.text; soff++)
+					for (var syoff = 0; syoff <= 2 && !suffix.text; syoff++)
+						for (var sfi = 0; sfi < 2 && !suffix.text; sfi++) {
+							if (soff === 0 && syoff === 0 && sfi === 0) { continue; }
+							suffix = OCR.readLine(buffer, sFonts[sfi], [255, 255, 255], endX + soff, secondPassY - syoff, true);
+							if (suffix.text && sfi === 1) { var f2d = suffix.text.match(/^[0-9]+/); suffix = f2d ? { text: f2d[0], fragments: suffix.fragments, debugArea: suffix.debugArea } : { text: "", fragments: [], debugArea: suffix.debugArea }; }
+						}
 			}
 			if (suffix.text) {
 				if (str.length === 2) {
-					if (/^[mhrK%]/.test(suffix.text)) { str = str + suffix.text.charAt(0); r.arg = str; }
-				} else {
-					str = str + suffix.text; r.arg = str;
-				}
-			}
-			// Trailing-1 recovery: try offsets when str ends with "1"
-			if (str.endsWith("1") && /^\d+$/.test(str)) {
-				for (var roff = 2; roff >= 0; roff--) {
-					var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, oy, true);
-					if (rr.text && rr.text.length >= 1 && rr.text.trim() === rr.text && rr.text !== "1") {
-						str = str + rr.text; r.arg = str; break;
-					}
-				}
+					if (/^[mhrK%]/.test(suffix.text)) { str += suffix.text[0]; }
+					else if (str.endsWith("1") && /^\d/.test(suffix.text)) { str += suffix.text; }
+				} else { str += suffix.text; }
 			}
 		}
-
-		// Stacked buff parens: if timer was found on upper line, scan for parens on lower line near oy
-		if (/^\d+$/.test(str) && str.length >= 1 && firstResult && firstResultY < oy) {
-			var spFound = false;
-			// Method 1: font2 on raw buffer with dot pattern
-			for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
-				if (pry < 0 || pry >= buffer.height) { continue; }
-				for (var prx = -1; prx <= 1 && !spFound; prx++) {
-					for (var prcb = 0; prcb < 2 && !spFound; prcb++) {
-						var prr = OCR.readLine(buffer, font2, [255, 255, 255], ox + prx, pry, prcb === 0);
-						if (prr.text) {
-							var prRaw = prr.text.replace(/ /g, "");
-							var prDp = prRaw.match(/^\.{1,3}(\d)\.{1,3}$/);
-							if (prDp) { str = str + "(" + prDp[1] + ")"; r.arg = str; spFound = true; }
-						}
-					}
-				}
-			}
-			// Create isolated buffer for methods 2-3
-			var spIso = new ImageData(buffer.width, buffer.height);
-			if (!spFound) {
-				for (var siy = 0; siy < buffer.height; siy++) {
-					for (var six = 0; six < buffer.width; six++) {
-						var siSrc = buffer.pixelOffset(six, siy);
-						var siDst = (siy * buffer.width + six) * 4;
-						var siAvg = (buffer.data[siSrc] + buffer.data[siSrc+1] + buffer.data[siSrc+2]) / 3;
-						var siVal = siAvg > 200 ? 255 : (siAvg < 80 ? 0 : Math.round((siAvg - 80) * 255 / 120));
-						spIso.data[siDst] = spIso.data[siDst+1] = spIso.data[siDst+2] = siVal;
-						spIso.data[siDst+3] = 255;
-					}
-				}
-				var spFonts = [font2, font, fontLow];
-				for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
-					for (var prx = -1; prx <= 1 && !spFound; prx++) {
-						for (var spfi = 0; spfi < spFonts.length && !spFound; spfi++) {
-							var srl = OCR.readLine(spIso, spFonts[spfi], [255, 255, 255], ox + prx, pry, true);
-							if (srl.text) {
-								var src2 = srl.text.replace(/[^0-9()]/g, "");
-								if (/\(\d\)/.test(src2)) {
-									var srm = src2.match(/\((\d)\)/);
-									if (srm) {
-										str = str + "(" + srm[1] + ")"; r.arg = str; spFound = true;
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-			// Method 3: pixel-level white cluster detection on iso buffer
-			if (!spFound) {
-				for (var wpy = oy - 3; wpy <= oy + 2 && !spFound; wpy++) {
-					if (wpy < 0 || wpy >= buffer.height) { continue; }
-					var wStart = -1;
-					var wCount = 0;
-					for (var wpx = ox + 3; wpx < ox + 25 && !spFound; wpx++) {
-						if (wpx >= buffer.width) { break; }
-						var wpi = buffer.pixelOffset(wpx, wpy);
-						var wR = buffer.data[wpi], wG = buffer.data[wpi+1], wB = buffer.data[wpi+2];
-						if (wR > 230 && wG > 230 && wB > 230) {
-							if (wStart === -1) { wStart = wpx; }
-							wCount++;
-						} else {
-							if (wCount >= 3 && wStart > ox + 2) {
-								// Bright cluster found — try readChar on iso buffer for the digit
-								// Read the shadow line BELOW the cluster to identify the digit
-								var wDigit = "";
-								if (wpy + 1 < buffer.height) {
-									// Build shadow pattern at y+1 (dark pixels = shadow of text above)
-									var wShadow = "";
-									for (var wpx2 = wStart - 1; wpx2 < wStart + wCount + 2 && wpx2 < buffer.width; wpx2++) {
-										if (wpx2 < 0) { wShadow += "0"; continue; }
-										var wsi = buffer.pixelOffset(wpx2, wpy + 1);
-										var wsl = (buffer.data[wsi] + buffer.data[wsi+1] + buffer.data[wsi+2]) / 3;
-										wShadow += wsl < 50 ? "1" : "0";
-									}
-									// Try readLine on raw buffer at the shadow row
-									var srl = OCR.readLine(buffer, font2, [255, 255, 255], wStart, wpy + 1, true);
-									// Also try bestDigit at y+1 (shadow position)
-									var sbd = BuffReader.bestDigit(buffer, wStart, wpy + 1, "17");
-									if (sbd) { wDigit = sbd; }
-								}
-								if (!wDigit) {
-									var wbd = BuffReader.bestDigit(spIso, wStart, wpy, "17");
-									if (!wbd) { wbd = BuffReader.bestDigit(buffer, wStart, wpy, "17"); }
-									wDigit = wbd || "";
-								}
-								if (wDigit) {
-									str = str + "(" + wDigit + ")";
-									r.arg = str;
-									spFound = true;
-								}
-							}
-							wStart = -1;
-							wCount = 0;
-						}
-					}
-				}
-			}
-			// Method 4: grayscale scan for "(" near oy
-			if (!spFound) {
-				var grayData = new ImageData(buffer.width, buffer.height);
-				for (var gi = 0; gi < buffer.data.length; gi += 4) {
-					var avg = (buffer.data[gi] + buffer.data[gi + 1] + buffer.data[gi + 2]) / 3;
-					grayData.data[gi] = grayData.data[gi + 1] = grayData.data[gi + 2] = avg;
-					grayData.data[gi + 3] = buffer.data[gi + 3];
-				}
-				for (var pry = oy - 4; pry <= oy + 4 && !spFound; pry++) {
-					for (var prx = -1; prx <= 1 && !spFound; prx++) {
-						var grl = OCR.readLine(grayData, font2, [255, 255, 255], ox + prx, pry, true);
-						if (grl.text) {
-							var spc = grl.text.replace(/[^0-9()]/g, "");
-							if (/^\d?\(\d\)$/.test(spc)) { str = str + spc.replace(/^\d/, ""); r.arg = str; spFound = true; }
-							var spRaw = grl.text.replace(/ /g, "");
-							var spDp = spRaw.match(/^\.{1,3}(\d)\.{1,3}$/);
-							if (spDp) { str = str + "(" + spDp[1] + ")"; r.arg = str; spFound = true; }
-						}
-						grl = OCR.readLine(grayData, font, [255, 255, 255], ox + prx, pry, true);
-						if (grl.text) {
-							var spc2 = grl.text.replace(/[^0-9()]/g, "");
-							if (/^\d?\(\d\)$/.test(spc2)) { str = str + spc2.replace(/^\d/, ""); r.arg = str; spFound = true; }
+		// Parens scan with canBlend: stacked buffs OR single-digit/empty readings
+		if ((/^\d+$/.test(str) && firstResult && firstResultY < oy) || (str.length <= 1 && /^\d?$/.test(str))) {
+			for (var pry = oy - 4, spFound = false; pry <= oy + 4 && !spFound; pry++) {
+				for (var prx = -1; prx <= 12 && !spFound; prx++) {
+					{	var pr = OCR.readLine(buffer, font2, [255, 255, 255], ox + prx, pry, true);
+						if (pr.text) {
+							var prc = pr.text.replace(/[^0-9()]/g, "");
+							if (/\(\d/.test(prc) && prc.indexOf(")") === -1) { prc = prc.replace(/\((\d).*/, "($1)"); }
+							var prm = prc.match(/\((\d)\)/);
+							if (prm) { str += "(" + prm[1] + ")"; spFound = true; }
 						}
 					}
 				}
 			}
 		}
-
 		// "m" suffix detection via stroke groups
 		if (/^\d+$/.test(str) && str.length >= 1) {
 			var endpointX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + str.length * 7;
-			var strokeGroups = 0;
-			var inBright = false;
-			var firstBrightCol = -1;
-			var brightColCount = 0;
+			var strokeGroups = 0, inBright = false, firstBrightCol = -1;
 			for (var sc = 0; sc < 14; sc++) {
 				var sx = endpointX + sc;
 				if (sx >= buffer.width) { break; }
 				var hasBright = false;
 				for (var sy = oy - 2; sy <= oy + 8; sy++) {
 					if (sy < 0 || sy >= buffer.height) { continue; }
-					var si = buffer.pixelOffset(sx, sy);
-					var sR = buffer.data[si], sG = buffer.data[si + 1], sB = buffer.data[si + 2];
-					var sLum = (sR + sG + sB) / 3;
-					var sMax = Math.max(sR, sG, sB);
-					var sMin = Math.min(sR, sG, sB);
-					var sSat = sMax > 0 ? ((sMax - sMin) / sMax) * 255 : 0;
-					if (sLum > 150 && sSat < 40) { hasBright = true; break; }
+					if (BuffReader.isBrightText(buffer, sx, sy)) { hasBright = true; break; }
 				}
 				if (hasBright) {
-					brightColCount++;
 					if (firstBrightCol === -1) { firstBrightCol = sc; }
 					if (!inBright) { strokeGroups++; inBright = true; }
 				} else { inBright = false; }
 			}
-
 			// Bright icon check for single digits (prevent false "m" on stack counts)
 			var isBrightIcon = false;
 			if (str.length === 1) {
-				var brightPixCount = 0;
-				for (var biy = oy - 20; biy < oy - 5; biy++) {
-					for (var bix = ox; bix < ox + 25; bix++) {
-						if (bix < 0 || biy < 0 || bix >= buffer.width || biy >= buffer.height) { continue; }
-						var bii = buffer.pixelOffset(bix, biy);
-						var biR = buffer.data[bii], biG = buffer.data[bii + 1], biB = buffer.data[bii + 2];
-						var biLum = (biR + biG + biB) / 3;
-						var biMax = Math.max(biR, biG, biB);
-						var biMin = Math.min(biR, biG, biB);
-						var biSat = biMax > 0 ? ((biMax - biMin) / biMax) * 255 : 0;
-						if (biLum > 150 && biSat < 40) { brightPixCount++; }
-					}
-				}
-				if (brightPixCount > 60) { isBrightIcon = true; }
+				var bpc = 0;
+				for (var biy = oy - 20; biy < oy - 5; biy++)
+					for (var bix = ox; bix < ox + 25; bix++)
+						if (bix >= 0 && biy >= 0 && bix < buffer.width && biy < buffer.height && BuffReader.isBrightText(buffer, bix, biy)) { bpc++; }
+				if (bpc > 60) { isBrightIcon = true; }
 			}
-
-			var isMinuteTimer = str.length >= 3 || (str.length === 2 && parseInt(str) >= 20);
-			var mThreshold = isMinuteTimer ? 2 : 3;
-			if (strokeGroups >= mThreshold && !isBrightIcon) { str = str + "m"; r.arg = str; }
-
-			// Gap digit recovery: if 2-digit + firstBrightCol >= 2
+			var mThreshold = (str.length >= 3 || (str.length === 2 && parseInt(str) >= 20)) ? 2 : 3;
+			if (strokeGroups >= mThreshold && !isBrightIcon) { str += "m"; }
+			// Gap digit recovery
 			if (str.length === 2 && /^\d{2}$/.test(str) && firstBrightCol >= 2) {
 				for (var gd = 0; gd < firstBrightCol; gd++) {
 					var gc1 = OCR.readChar(buffer, font, [255, 255, 255], endpointX + gd, oy, true);
-					if (gc1 && /[2-9]/.test(gc1.chr)) { str = str + gc1.chr; r.arg = str; break; }
+					if (gc1 && /[2-9]/.test(gc1.chr)) { str += gc1.chr; break; }
 				}
 			}
 		}
-
 		// "%" suffix detection
 		if (/^\d{2}$/.test(str)) {
 			var pctEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 14;
@@ -710,53 +412,30 @@ export default class BuffReader {
 			for (var py = oy - 2; py <= oy + 8; py++) {
 				for (var px = pctEndX; px < pctEndX + 10; px++) {
 					if (px < 0 || py < 0 || px >= buffer.width || py >= buffer.height) { continue; }
-					var pi = buffer.pixelOffset(px, py);
-					var pR = buffer.data[pi], pG = buffer.data[pi + 1], pB = buffer.data[pi + 2];
-					var pLum = (pR + pG + pB) / 3;
-					var pMax = Math.max(pR, pG, pB);
-					var pMin = Math.min(pR, pG, pB);
-					var pSat = pMax > 0 ? ((pMax - pMin) / pMax) * 255 : 0;
-					if (pLum > 150 && pSat < 40) { brightPctPix++; }
+					if (BuffReader.isBrightText(buffer, px, py)) { brightPctPix++; }
 				}
 			}
-			if (brightPctPix >= 80) { str = str + "%"; r.arg = str; }
+			if (brightPctPix >= 80) { str += "%"; }
 		}
-
-		if (type === "arg") { r.arg = str; }
+		r.arg = str;
 		return r;
 	}
-
-	private static bestDigit(buffer: ImageData, ox: number, oy: number, exclude: string): string | null {
-		var best: { chr: string, sizescore: number } | null = null;
-		var fonts = [font2, font, fontLow];
-		for (var fi = 0; fi < fonts.length; fi++) {
-			for (var ddx = 0; ddx <= 6; ddx++) {
-				for (var ddy = -2; ddy <= 2; ddy++) {
-					for (var cb = 0; cb < 2; cb++) {
-						var rc = OCR.readChar(buffer, fonts[fi], [255, 255, 255], ox + ddx, oy + ddy, cb === 0);
-						if (rc && /[0-9]/.test(rc.chr) && exclude.indexOf(rc.chr) === -1) {
-							if (!best || rc.sizescore > best.sizescore) {
-								best = { chr: rc.chr, sizescore: rc.sizescore };
-							}
-						}
-					}
-				}
-			}
-		}
-		return best ? best.chr : null;
+	private static isBrightText(buffer: ImageData, x: number, y: number): boolean {
+		var i = buffer.pixelOffset(x, y);
+		var R = buffer.data[i], G = buffer.data[i+1], B = buffer.data[i+2];
+		var lum = (R + G + B) / 3;
+		var mx = Math.max(R, G, B), mn = Math.min(R, G, B);
+		return lum > 150 && (mx > 0 ? ((mx - mn) / mx) * 255 : 0) < 40;
 	}
-
 	static readTime(buffer: ImageData, ox: number, oy: number) {
 		return this.readArg(buffer, ox, oy, "time").time;
 	}
-
 	static matchBuff(state: Buff[], buffimg: ImageData) {
 		for (var a in state) {
 			if (state[a].compareBuffer(buffimg)) { return state[a]; }
 		}
 		return null;
 	}
-
 	static matchBuffMulti(state: Buff[], buffinfo: BuffInfo) {
 		if (buffinfo.final) {//cheap way if we known exactly what we're searching for
 			return BuffReader.matchBuff(state, buffinfo.imgdata);
