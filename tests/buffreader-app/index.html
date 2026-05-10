@@ -13,17 +13,18 @@
 		.header .status { font-size: 11px; color: #666; }
 		.header .status.active { color: #00cc66; }
 
-		.toolbar { padding: 6px 12px; background: #16213e; display: flex; gap: 6px; align-items: center; border-bottom: 1px solid #0f3460; }
+		.toolbar { padding: 6px 12px; background: #16213e; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid #0f3460; }
 		button { background: #0f3460; color: #ccc; border: 1px solid #1a4080; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.15s; }
 		button:hover { background: #1a4080; color: #fff; }
 		button.primary { background: #e94560; border-color: #e94560; color: #fff; }
 		button.primary:hover { background: #d63050; }
 		button.active { background: #00aa55; border-color: #00aa55; color: #fff; }
+		button.toggle-on { background: #0f3460; border-color: #00cc66; color: #00cc66; }
 		button:disabled { opacity: 0.4; cursor: default; }
 		select { background: #0f3460; color: #ccc; border: 1px solid #1a4080; padding: 4px 6px; border-radius: 4px; font-size: 12px; }
 		label { font-size: 11px; color: #888; }
 
-		.content { padding: 8px 12px; }
+		.content { padding: 8px 12px; padding-bottom: 30px; }
 		.section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin: 8px 0 4px; }
 		.section-label.buff { color: #00cc66; }
 		.section-label.debuff { color: #e94560; }
@@ -51,10 +52,28 @@
 		.stats-bar span { display: flex; align-items: center; gap: 4px; }
 		.stats-bar .dot { width: 6px; height: 6px; border-radius: 50%; background: #333; }
 		.stats-bar .dot.on { background: #00cc66; }
-		.stats-bar .dot.warn { background: #ff8800; }
 
 		.error-bar { padding: 6px 12px; background: #2a1020; color: #ff6666; font-size: 11px; display: none; }
 		.error-bar.show { display: block; }
+
+		/* Debug panel */
+		.debug-panel { display: none; border-top: 1px solid #0f3460; margin-top: 8px; }
+		.debug-panel.show { display: block; }
+		.debug-section { margin: 6px 0; }
+		.debug-section h3 { font-size: 11px; color: #e94560; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+		.debug-capture { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0; }
+		.debug-capture canvas { border: 1px solid #333; image-rendering: pixelated; background: #000; }
+		.debug-log { background: #0a0a1a; border: 1px solid #1a1a3a; border-radius: 4px; padding: 6px 8px; font-family: 'Consolas', monospace; font-size: 11px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: #8888aa; }
+		.debug-log .pass { color: #00cc66; }
+		.debug-log .fail { color: #ff4444; }
+		.debug-log .info { color: #5588cc; }
+		.debug-log .warn { color: #ffcc00; }
+		.debug-buff-grid { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0; }
+		.debug-buff-cell { text-align: center; }
+		.debug-buff-cell canvas { display: block; border: 1px solid #333; image-rendering: pixelated; }
+		.debug-buff-cell .label { font-size: 10px; color: #888; margin-top: 2px; }
+		.debug-buff-cell .value { font-size: 12px; font-weight: 600; color: #00ff88; }
+		.debug-buff-cell .value.empty { color: #555; }
 
 		@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
 	</style>
@@ -67,11 +86,15 @@
 	<div class="toolbar">
 		<button class="primary" id="btnStart">Start</button>
 		<button id="btnStop" disabled>Stop</button>
+		<button id="btnOnce">Read Once</button>
+		<button id="btnDebug">Debug</button>
+		<button id="btnSave">Save .data.png</button>
 		<label>Every <select id="interval">
 			<option value="200">200ms</option>
 			<option value="300" selected>300ms</option>
 			<option value="500">500ms</option>
 			<option value="1000">1s</option>
+			<option value="2000">2s</option>
 		</select></label>
 	</div>
 	<div class="error-bar" id="error"></div>
@@ -79,7 +102,7 @@
 		<div class="empty-state" id="emptyState">
 			<div class="icon">&#9876;</div>
 			<p><b>No buffs detected</b></p>
-			<p>Click Start to begin scanning</p>
+			<p>Click Start or Read Once to begin</p>
 		</div>
 		<div id="buffSection" style="display:none">
 			<div class="section-label buff">Buffs</div>
@@ -88,6 +111,20 @@
 		<div id="debuffSection" style="display:none">
 			<div class="section-label debuff">Debuffs</div>
 			<div class="buff-list" id="debuffList"></div>
+		</div>
+		<div class="debug-panel" id="debugPanel">
+			<div class="debug-section">
+				<h3>Capture</h3>
+				<div class="debug-capture" id="debugCapture"></div>
+			</div>
+			<div class="debug-section">
+				<h3>Individual Buffs (2x zoom)</h3>
+				<div class="debug-buff-grid" id="debugBuffGrid"></div>
+			</div>
+			<div class="debug-section">
+				<h3>Log</h3>
+				<div class="debug-log" id="debugLog"></div>
+			</div>
 		</div>
 	</div>
 	<div class="stats-bar">
@@ -106,8 +143,11 @@
 		var timer = null;
 		var reads = 0;
 		var errors = 0;
-		var lastBuffCount = 0;
-		var lastDebuffCount = 0;
+		var debugMode = false;
+		var prevBuffResults = [];
+		var prevDebuffResults = [];
+		var lastBuffCapture = null;
+		var lastDebuffCapture = null;
 
 		var elStatus = document.getElementById('status');
 		var elError = document.getElementById('error');
@@ -119,6 +159,10 @@
 		var elDot = document.getElementById('dotStatus');
 		var elStatsText = document.getElementById('statsText');
 		var elStatsReads = document.getElementById('statsReads');
+		var elDebugPanel = document.getElementById('debugPanel');
+		var elDebugCapture = document.getElementById('debugCapture');
+		var elDebugBuffGrid = document.getElementById('debugBuffGrid');
+		var elDebugLog = document.getElementById('debugLog');
 
 		function setStatus(msg, active) {
 			elStatus.textContent = msg;
@@ -128,6 +172,56 @@
 		function setError(msg) {
 			elError.textContent = msg;
 			elError.className = 'error-bar' + (msg ? ' show' : '');
+		}
+
+		function debugLog(msg, cls) {
+			if (!debugMode) return;
+			var line = document.createElement('div');
+			if (cls) line.className = cls;
+			line.textContent = msg;
+			elDebugLog.appendChild(line);
+			elDebugLog.scrollTop = elDebugLog.scrollHeight;
+		}
+
+		function clearDebug() {
+			elDebugLog.innerHTML = '';
+			elDebugCapture.innerHTML = '';
+			elDebugBuffGrid.innerHTML = '';
+		}
+
+		function drawImageData(imgData, scale) {
+			scale = scale || 1;
+			var canvas = document.createElement('canvas');
+			canvas.width = imgData.width * scale;
+			canvas.height = imgData.height * scale;
+			var ctx = canvas.getContext('2d');
+			if (scale === 1) {
+				ctx.putImageData(imgData, 0, 0);
+			} else {
+				var tmp = document.createElement('canvas');
+				tmp.width = imgData.width;
+				tmp.height = imgData.height;
+				tmp.getContext('2d').putImageData(imgData, 0, 0);
+				ctx.imageSmoothingEnabled = false;
+				ctx.drawImage(tmp, 0, 0, canvas.width, canvas.height);
+			}
+			return canvas;
+		}
+
+		function extractBuffIcon(buffer, bx, by) {
+			var size = 27;
+			var icon = new ImageData(size, size);
+			for (var y = 0; y < size; y++) {
+				for (var x = 0; x < size; x++) {
+					var si = ((by + y) * buffer.width + (bx + x)) * 4;
+					var di = (y * size + x) * 4;
+					icon.data[di] = buffer.data[si];
+					icon.data[di+1] = buffer.data[si+1];
+					icon.data[di+2] = buffer.data[si+2];
+					icon.data[di+3] = buffer.data[si+3];
+				}
+			}
+			return icon;
 		}
 
 		function getTimerColor(text) {
@@ -151,16 +245,16 @@
 			return false;
 		}
 
-		function renderBuffItem(timer, index, isDebuff) {
-			var color = getTimerColor(timer);
-			var expiring = isExpiring(timer);
+		function renderBuffItem(timerText, index, isDebuff) {
+			var color = getTimerColor(timerText);
+			var expiring = isExpiring(timerText);
 			var cls = 'buff-item';
 			if (isDebuff) cls += ' debuff-item';
-			else if (timer) cls += ' has-timer';
+			else if (timerText) cls += ' has-timer';
 			if (expiring) cls += ' expiring';
 			return '<div class="' + cls + '">' +
 				'<div class="buff-info">' +
-				'<div class="buff-timer ' + color + '">' + (timer || '--') + '</div>' +
+				'<div class="buff-timer ' + color + '">' + (timerText || '--') + '</div>' +
 				'<div class="buff-slot">' + (isDebuff ? 'Debuff' : 'Buff') + ' ' + index + '</div>' +
 				'</div></div>';
 		}
@@ -186,66 +280,166 @@
 			}
 
 			var parts = [];
-			if (foundBuff) parts.push('Buffs at [' + buffReader.pos.x + ',' + buffReader.pos.y + ']');
-			if (foundDebuff) parts.push('Debuffs at [' + debuffReader.pos.x + ',' + debuffReader.pos.y + ']');
+			if (foundBuff) {
+				parts.push('Buffs [' + buffReader.pos.x + ',' + buffReader.pos.y + ']');
+				debugLog('Buff bar found at [' + buffReader.pos.x + ',' + buffReader.pos.y + '] maxhor=' + buffReader.pos.maxhor, 'pass');
+			} else {
+				debugLog('Buff bar not found', 'warn');
+			}
+			if (foundDebuff) {
+				parts.push('Debuffs [' + debuffReader.pos.x + ',' + debuffReader.pos.y + ']');
+				debugLog('Debuff bar found at [' + debuffReader.pos.x + ',' + debuffReader.pos.y + '] maxhor=' + debuffReader.pos.maxhor, 'pass');
+			} else {
+				debugLog('Debuff bar not found', 'warn');
+			}
 			setStatus(parts.join(' | '), true);
 			return true;
+		}
+
+		function processBar(reader, isDebuff, label) {
+			var results = [];
+			if (!reader || !reader.pos) return results;
+
+			try {
+				var rect = reader.getCaptRect();
+				if (!rect) return results;
+				var buf = A1lib.capture(rect.x, rect.y, rect.width, rect.height);
+				if (isDebuff) lastDebuffCapture = buf; else lastBuffCapture = buf;
+
+				if (debugMode) {
+					debugLog(label + ' capture: ' + rect.width + 'x' + rect.height + ' at [' + rect.x + ',' + rect.y + ']', 'info');
+					var captureCanvas = drawImageData(buf, 2);
+					captureCanvas.title = label + ' capture (' + rect.width + 'x' + rect.height + ')';
+					elDebugCapture.appendChild(captureCanvas);
+				}
+
+				var buffs = reader.read(buf);
+				if (!buffs || buffs.length === 0) {
+					debugLog(label + ': no buffs detected in capture', 'warn');
+					return results;
+				}
+
+				debugLog(label + ': ' + buffs.length + ' slot(s) detected', 'info');
+
+				for (var i = 0; i < buffs.length; i++) {
+					var arg = '', time = 0;
+					try {
+						var r = buffs[i].readArg('arg');
+						arg = r.arg || '';
+						time = r.time || 0;
+					} catch(e) {
+						debugLog('  slot ' + i + ': readArg error: ' + e.message, 'fail');
+					}
+
+					results.push(arg);
+
+					if (debugMode) {
+						var icon = extractBuffIcon(buf, buffs[i].bufferx, buffs[i].buffery);
+						var cell = document.createElement('div');
+						cell.className = 'debug-buff-cell';
+						var iconCanvas = drawImageData(icon, 3);
+						cell.appendChild(iconCanvas);
+						var lbl = document.createElement('div');
+						lbl.className = 'label';
+						lbl.textContent = label + ' ' + i;
+						cell.appendChild(lbl);
+						var val = document.createElement('div');
+						val.className = 'value' + (arg ? '' : ' empty');
+						val.textContent = arg || '--';
+						cell.appendChild(val);
+						elDebugBuffGrid.appendChild(cell);
+
+						// Border color analysis
+						var bx = buffs[i].bufferx, by = buffs[i].buffery;
+						var corners = [[0,0],[13,0],[26,0],[0,26],[26,26]];
+						var borderColors = corners.map(function(c) {
+							var pi = buf.pixelOffset(bx + c[0], by + c[1]);
+							return [buf.data[pi], buf.data[pi+1], buf.data[pi+2]];
+						});
+						var avgG = borderColors.reduce(function(s,c){return s+c[1];},0) / borderColors.length;
+						var avgR = borderColors.reduce(function(s,c){return s+c[0];},0) / borderColors.length;
+						var isDim = avgG < 135;
+						var borderStr = borderColors.map(function(c){return '['+c[0]+','+c[1]+','+c[2]+']';}).join(' ');
+
+						var pos = '[' + bx + ',' + by + ']';
+						var timePart = time > 0 ? ' time=' + time + 's' : '';
+						var borderCls = isDim ? 'warn' : (arg ? 'pass' : 'info');
+						debugLog('  slot ' + i + ': pos=' + pos + ' read="' + arg + '"' + timePart, borderCls);
+						debugLog('    border: ' + borderStr + (isDim ? ' [DIM avgG=' + avgG.toFixed(0) + ']' : ' avgG=' + avgG.toFixed(0)), isDim ? 'warn' : 'info');
+					}
+				}
+			} catch(e) {
+				setError(label + ' error: ' + e.message);
+				debugLog(label + ' error: ' + e.message + '\n' + e.stack, 'fail');
+				errors++;
+			}
+
+			return results;
 		}
 
 		function readAll() {
 			reads++;
 			setError('');
+			if (debugMode) clearDebug();
+			debugLog('--- Read #' + reads + ' ---', 'info');
+
+			var buffResults = processBar(buffReader, false, 'Buff');
+			var debuffResults = processBar(debuffReader, true, 'Debuff');
+
+			// Track changes — log when buffs appear/disappear/change
+			function scanBorderAt(capture, slotIdx) {
+				if (!capture) return '';
+				var bx = slotIdx * 30, by = 0;
+				if (bx + 27 > capture.width || by + 27 > capture.height) return ' [out of bounds]';
+				var corners = [[0,0],[13,0],[26,0],[0,13],[26,13],[0,26],[13,26],[26,26]];
+				var cols = corners.map(function(c) {
+					var pi = capture.pixelOffset(bx + c[0], by + c[1]);
+					return [capture.data[pi], capture.data[pi+1], capture.data[pi+2]];
+				});
+				var avgR = cols.reduce(function(s,c){return s+c[0];},0) / cols.length;
+				var avgG = cols.reduce(function(s,c){return s+c[1];},0) / cols.length;
+				var avgB = cols.reduce(function(s,c){return s+c[2];},0) / cols.length;
+				return ' border=[' + avgR.toFixed(0) + ',' + avgG.toFixed(0) + ',' + avgB.toFixed(0) + ']' +
+					' samples: ' + cols.map(function(c){return '['+c+']';}).join(' ');
+			}
+			function trackChanges(prev, curr, label, capture) {
+				var maxLen = Math.max(prev.length, curr.length);
+				for (var i = 0; i < maxLen; i++) {
+					var p = i < prev.length ? prev[i] : undefined;
+					var c = i < curr.length ? curr[i] : undefined;
+					if (p === c) continue;
+					var ts = new Date().toLocaleTimeString();
+					if (p && !c) {
+						var borderInfo = scanBorderAt(capture, i);
+						debugLog('[' + ts + '] ' + label + ' ' + i + ' DISAPPEARED: was "' + p + '"' + borderInfo, 'fail');
+						console.warn(label + ' ' + i + ' DISAPPEARED: was "' + p + '" at read #' + reads + borderInfo);
+					} else if (!p && c) {
+						debugLog('[' + ts + '] ' + label + ' ' + i + ' appeared: "' + c + '"', 'pass');
+					} else if (p !== c) {
+						debugLog('[' + ts + '] ' + label + ' ' + i + ' changed: "' + p + '" -> "' + c + '"', 'warn');
+					}
+				}
+				if (prev.length > 0 && curr.length === 0) {
+					var ts = new Date().toLocaleTimeString();
+					debugLog('[' + ts + '] ' + label + ' bar LOST — 0 slots detected (had ' + prev.length + ')', 'fail');
+					console.warn(label + ' bar LOST at read #' + reads + ' (had ' + prev.length + ' slots)');
+				}
+			}
+			trackChanges(prevBuffResults, buffResults, 'Buff', lastBuffCapture);
+			trackChanges(prevDebuffResults, debuffResults, 'Debuff', lastDebuffCapture);
+			prevBuffResults = buffResults.slice();
+			prevDebuffResults = debuffResults.slice();
+
 			var buffHtml = '';
+			for (var i = 0; i < buffResults.length; i++) buffHtml += renderBuffItem(buffResults[i], i, false);
 			var debuffHtml = '';
-			var buffCount = 0;
-			var debuffCount = 0;
-
-			if (buffReader && buffReader.pos) {
-				try {
-					var rect = buffReader.getCaptRect();
-					if (rect) {
-						var buf = A1lib.capture(rect.x, rect.y, rect.width, rect.height);
-						var buffs = buffReader.read(buf);
-						if (buffs && buffs.length > 0) {
-							buffCount = buffs.length;
-							for (var i = 0; i < buffs.length; i++) {
-								var arg = '';
-								try { var r = buffs[i].readArg('arg'); arg = r.arg || ''; } catch(e) {}
-								buffHtml += renderBuffItem(arg, i, false);
-							}
-						}
-					}
-				} catch(e) { setError('Buff read error: ' + e.message); errors++; }
-			}
-
-			if (debuffReader && debuffReader.pos) {
-				try {
-					var rect2 = debuffReader.getCaptRect();
-					if (rect2) {
-						var buf2 = A1lib.capture(rect2.x, rect2.y, rect2.width, rect2.height);
-						var debuffs = debuffReader.read(buf2);
-						if (debuffs && debuffs.length > 0) {
-							debuffCount = debuffs.length;
-							for (var i = 0; i < debuffs.length; i++) {
-								var arg = '';
-								try { var r = debuffs[i].readArg('arg'); arg = r.arg || ''; } catch(e) {}
-								debuffHtml += renderBuffItem(arg, i, true);
-							}
-						}
-					}
-				} catch(e) { setError('Debuff read error: ' + e.message); errors++; }
-			}
+			for (var i = 0; i < debuffResults.length; i++) debuffHtml += renderBuffItem(debuffResults[i], i, true);
 
 			elBuffList.innerHTML = buffHtml;
 			elDebuffList.innerHTML = debuffHtml;
-			elBuffSection.style.display = buffCount > 0 ? '' : 'none';
-			elDebuffSection.style.display = debuffCount > 0 ? '' : 'none';
-			elEmpty.style.display = (buffCount === 0 && debuffCount === 0) ? '' : 'none';
-
-			if (buffCount !== lastBuffCount || debuffCount !== lastDebuffCount) {
-				lastBuffCount = buffCount;
-				lastDebuffCount = debuffCount;
-			}
+			elBuffSection.style.display = buffResults.length > 0 ? '' : 'none';
+			elDebuffSection.style.display = debuffResults.length > 0 ? '' : 'none';
+			elEmpty.style.display = (buffResults.length === 0 && debuffResults.length === 0) ? '' : 'none';
 
 			elDot.className = 'dot on';
 			elStatsText.textContent = 'Reading';
@@ -275,8 +469,66 @@
 			elStatsText.textContent = 'Stopped';
 		}
 
+		function readOnce() {
+			stop();
+			if (!buffReader || !buffReader.pos) {
+				if (!findBars()) return;
+			}
+			readAll();
+		}
+
+		function toggleDebug() {
+			debugMode = !debugMode;
+			elDebugPanel.className = 'debug-panel' + (debugMode ? ' show' : '');
+			document.getElementById('btnDebug').className = debugMode ? 'toggle-on' : '';
+			if (!debugMode) clearDebug();
+		}
+
+		function imageDataToPngBlob(imgData, callback) {
+			var canvas = document.createElement('canvas');
+			canvas.width = imgData.width;
+			canvas.height = imgData.height;
+			canvas.getContext('2d').putImageData(imgData, 0, 0);
+			canvas.toBlob(callback, 'image/png');
+		}
+
+		function downloadBlob(blob, filename) {
+			var a = document.createElement('a');
+			a.href = URL.createObjectURL(blob);
+			a.download = filename;
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+			URL.revokeObjectURL(a.href);
+		}
+
+		function saveCaptures() {
+			var saved = 0;
+			var ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+			if (lastBuffCapture) {
+				imageDataToPngBlob(lastBuffCapture, function(blob) {
+					downloadBlob(blob, 'buffs_' + ts + '.data.png');
+				});
+				saved++;
+			}
+			if (lastDebuffCapture) {
+				imageDataToPngBlob(lastDebuffCapture, function(blob) {
+					downloadBlob(blob, 'debuffs_' + ts + '.data.png');
+				});
+				saved++;
+			}
+			if (saved === 0) {
+				setError('No captures yet. Run a read first.');
+			} else {
+				debugLog('Saved ' + saved + ' capture(s) as .data.png', 'pass');
+			}
+		}
+
 		document.getElementById('btnStart').onclick = start;
 		document.getElementById('btnStop').onclick = stop;
+		document.getElementById('btnOnce').onclick = readOnce;
+		document.getElementById('btnDebug').onclick = toggleDebug;
+		document.getElementById('btnSave').onclick = saveCaptures;
 
 		if (typeof alt1 !== 'undefined') {
 			alt1.identifyAppUrl('./appconfig.json');

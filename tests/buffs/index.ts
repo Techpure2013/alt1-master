@@ -45,6 +45,7 @@ let tests = webpackImages({
 	famtimer: import("./imgs/famtimer.data.png"),
 	famtimer2: import("./imgs/famtimer2.data.png"),
 	dismember14: import("./imgs/14dismember.data.png"),
+	glowbuff: import("./imgs/buffs_2026-05-10T21-43-07.data.png"),
 });
 
 type Expected = { buffs: (string | null)[], debuffs: (string | null)[] };
@@ -58,7 +59,7 @@ let expected: { [key: string]: Expected } = {
 		debuffs: ["2.9"]
 	},
 	more3: {
-		buffs: ["3", "50", null, null, null, null],
+		buffs: ["3", "9", "50", null, null, null],
 		debuffs: ["3.3"]
 	},
 	dark59m: {
@@ -106,7 +107,8 @@ let expected: { [key: string]: Expected } = {
 	familiarTimer30m: { buffs: ["5", "7", "16", "3", "11m", null, "30m"], debuffs: ["2.9"] },
 	famtimer: { buffs: ["53", null, "34"], debuffs: ["2.9"] },
 	famtimer2: { buffs: ["53", null, "63m"], debuffs: ["2.9"] },
-	dismember14: { buffs: ["14", "4", "8m", "8", "8"], debuffs: [] }
+	dismember14: { buffs: ["14", "4", "8m", "8", "8"], debuffs: [] },
+	glowbuff: { buffs: ["10", "2"], debuffs: [] }
 };
 
 
@@ -142,13 +144,12 @@ export default async function run() {
 
 			console.log(`  ${label} found: pos=[${reader.pos.x},${reader.pos.y}]`);
 
-			// Crop buffer
-			let cropX = reader.pos.x;
-			let cropY = reader.pos.y;
-			let cropW = (reader.pos.maxhor + 1) * BuffReader.gridsize + BuffReader.buffsize;
-			let cropH = (reader.pos.maxver + 1) * BuffReader.gridsize + BuffReader.buffsize;
-			cropW = Math.min(cropW, imgdata.width - cropX);
-			cropH = Math.min(cropH, imgdata.height - cropY);
+			// Use getCaptRect to match live behavior (includes padLeft for dim buffs)
+			let captRect = reader.getCaptRect()!;
+			let cropX = captRect.x;
+			let cropY = captRect.y;
+			let cropW = Math.min(captRect.width, imgdata.width - cropX);
+			let cropH = Math.min(captRect.height, imgdata.height - cropY);
 			let croppedBuffer = imgdata.clone({ x: cropX, y: cropY, width: cropW, height: cropH });
 
 			let buffs: any[] | null = null;

@@ -2,24 +2,20 @@ import * as a1lib from "alt1/base";
 import * as OCR from "alt1/ocr";
 import { webpackImages, ImgRef } from "alt1/base";
 import type { ColortTriplet } from "alt1/ocr";
-
 var imgs = webpackImages({
 	buff: require("./imgs/buffborder.data.png"),
 	debuff: require("./imgs/debuffborder.data.png"),
 	buff_alt: require("./imgs/buffborder_alt.data.png"),
 	debuff_alt: require("./imgs/debuffborder_alt.data.png"),
+	buff_dim: require("./imgs/buffborder_dim.data.png"),
 });
-
 var font = require("../fonts/aa_8px_new.fontmeta.json");
 var font2 = require("../fonts/aa_8px_buff2.fontmeta.json");
-
 function negmod(a: number, b: number) {
 	return ((a % b) + b) % b;
 }
 
-
 export type BuffTextTypes = "time" | "timearg" | "arg";
-
 export class Buff {
 	isdebuff: boolean;
 	buffer: ImageData;
@@ -44,20 +40,21 @@ export class Buff {
 		return BuffReader.countMatch(this.buffer, this.bufferx + 1, this.buffery + 1, img, aggressive);
 	}
 }
-
 export default class BuffReader {
 	pos: { x: number, y: number, maxhor: number, maxver: number } | null = null;
 	debuffs = false;
-
 	static buffsize = 27;
 	static gridsize = 30;
-
 	find(img?: ImgRef) {
 		if (!img) { img = a1lib.captureHoldFullRs(); }
 		if (!img) { return null; }
 		var poslist = img.findSubimage(this.debuffs ? imgs.debuff : imgs.buff);
 		var poslist_alt = img.findSubimage(this.debuffs ? imgs.debuff_alt : imgs.buff_alt);
 		for (var ai = 0; ai < poslist_alt.length; ai++) { poslist.push(poslist_alt[ai]); }
+		if (!this.debuffs) {
+			var poslist_dim = img.findSubimage(imgs.buff_dim);
+			for (var di = 0; di < poslist_dim.length; di++) { poslist.push(poslist_dim[di]); }
+		}
 		if (poslist.length == 0) { return null; }
 		type BuffPos = { n: number, x: number, y: number }
 		var grids: BuffPos[] = [];
@@ -89,7 +86,8 @@ export default class BuffReader {
 	}
 	getCaptRect() {
 		if (!this.pos) { return null; }
-		return new a1lib.Rect(this.pos.x, this.pos.y, (this.pos.maxhor + 1) * BuffReader.gridsize, (this.pos.maxver + 1) * BuffReader.gridsize);
+		var padLeft = this.pos.x >= BuffReader.gridsize ? BuffReader.gridsize : 0;
+		return new a1lib.Rect(this.pos.x - padLeft, this.pos.y, padLeft + (this.pos.maxhor + 1) * BuffReader.gridsize, (this.pos.maxver + 1) * BuffReader.gridsize);
 	}
 	read(buffer?: ImageData) {
 		if (!this.pos) { throw new Error("no pos"); }
@@ -97,38 +95,45 @@ export default class BuffReader {
 		var rect = this.getCaptRect();
 		if (!rect) { return null; }
 		if (!buffer) { buffer = a1lib.capture(rect.x, rect.y, rect.width, rect.height); }
+		var padLeft = this.pos.x - rect.x;
 		var maxhor = 0;
 		var maxver = 0;
-		for (var ix = 0; ix <= this.pos.maxhor; ix++) {
+		var misses = 0;
+		var done = false;
+		for (var ix = (padLeft > 0 ? -1 : 0); ix <= this.pos.maxhor && !done; ix++) {
+			var matched = false;
 			for (var iy = 0; iy <= this.pos.maxver; iy++) {
-				var x = ix * BuffReader.gridsize;
+				var x = padLeft + ix * BuffReader.gridsize;
 				var y = iy * BuffReader.gridsize;
-
 				if (x + BuffReader.buffsize > buffer.width || y + BuffReader.buffsize > buffer.height) { break; }
-
 				//Allow small tolerance for minor color variations across systems
-				var match = buffer.pixelCompare((this.debuffs ? imgs.debuff : imgs.buff), x, y) < 600;
+				var match = buffer.pixelCompare((this.debuffs ? imgs.debuff : imgs.buff), x, y, 50) < 1200;
 				if (!match) {
-					match = buffer.pixelCompare((this.debuffs ? imgs.debuff_alt : imgs.buff_alt), x, y) < 600;
+					match = buffer.pixelCompare((this.debuffs ? imgs.debuff_alt : imgs.buff_alt), x, y, 50) < 1200;
+				}
+				//Wider tolerance for glowing/dimmed buff borders using standard template
+				if (!match && !this.debuffs) {
+					match = buffer.pixelCompare(imgs.buff, x, y, 60) < 2000;
 				}
 				if (!match) { break; }
+				matched = true;
 				r.push(new Buff(buffer, x, y, this.debuffs));
 				maxhor = Math.max(maxhor, ix);
 				maxver = Math.max(maxver, iy);
 			}
+			if (!matched) { misses++; if (misses >= 2) { done = true; } }
+			else { misses = 0; }
 		}
 		this.pos.maxhor = Math.max(5, maxhor + 2);
 		this.pos.maxver = Math.max(1, maxver + 1);
 		return r;
 	}
-
 	static compareBuffer(buffer: ImageData, ox: number, oy: number, buffimg: ImageData) {
 		var r = BuffReader.countMatch(buffer, ox, oy, buffimg, true);
 		if (r.failed > 0) { return false; }
 		if (r.tested < 50) { return false; }
 		return true;
 	}
-
 	static countMatch(buffer: ImageData, ox: number, oy: number, buffimg: ImageData, agressive?: boolean) {
 		var r = { tested: 0, failed: 0, skipped: 0, passed: 0 };
 		var data1 = buffer.data;
@@ -137,18 +142,14 @@ export default class BuffReader {
 			for (var x = 0; x < buffimg.width; x++) {
 				var i1 = buffer.pixelOffset(ox + x, oy + y);
 				var i2 = buffimg.pixelOffset(x, y);
-
 				if (data2[i2 + 3] != 255) { r.skipped++; continue; }//transparent buff pixel
-
 				var R1 = data1[i1], G1 = data1[i1 + 1], B1 = data1[i1 + 2];
 				var lum = (R1 + G1 + B1) / 3;
 				var maxc = Math.max(R1, G1, B1);
 				var minc = Math.min(R1, G1, B1);
 				var sat = maxc > 0 ? ((maxc - minc) / maxc) * 255 : 0;
-
 				if (lum > 140 && sat < 60) { r.skipped++; continue; }//bright low-sat pixel - part of buff time text
 				if (lum < 50) { r.skipped++; continue; }//dark pixel - part of buff time text shadow
-
 				var d = a1lib.ImageDetect.coldif(data1[i1], data1[i1 + 1], data1[i1 + 2], data2[i2], data2[i2 + 1], data2[i2 + 2], 255);
 				r.tested++;
 				if (d > 35) {
@@ -163,11 +164,9 @@ export default class BuffReader {
 		return r;
 	}
 
-
 	static isolateBuffer(buffer: ImageData, ox: number, oy: number, buffimg: ImageData) {
 		var count = BuffReader.countMatch(buffer, ox, oy, buffimg);
 		if (count.passed < 50) { return; }
-
 		var removed = 0;
 		var data1 = buffer.data;
 		var data2 = buffimg.data;
@@ -175,20 +174,16 @@ export default class BuffReader {
 			for (var x = 0; x < buffimg.width; x++) {
 				var i1 = buffer.pixelOffset(ox + x, oy + y);
 				var i2 = buffimg.pixelOffset(x, y);
-
 				if (data2[i2 + 3] != 255) { continue; }//transparent buff pixel
-
 				var R1 = data1[i1], G1 = data1[i1 + 1], B1 = data1[i1 + 2];
 				var lum1 = (R1 + G1 + B1) / 3;
 				var maxc1 = Math.max(R1, G1, B1);
 				var minc1 = Math.min(R1, G1, B1);
 				var sat1 = maxc1 > 0 ? ((maxc1 - minc1) / maxc1) * 255 : 0;
-
 				//==== new buffer has text on it ====
 				if ((lum1 > 140 && sat1 < 60) || lum1 < 50) {
 					continue;
 				}
-
 				//==== old buf has text on it, use the new one ====
 				var R2 = data2[i2], G2 = data2[i2 + 1], B2 = data2[i2 + 2];
 				var lum2 = (R2 + G2 + B2) / 3;
@@ -202,7 +197,6 @@ export default class BuffReader {
 					data2[i2 + 3] = data1[i1 + 3];
 					removed++;
 				}
-
 				var d = a1lib.ImageDetect.coldif(data1[i1], data1[i1 + 1], data1[i1 + 2], data2[i2], data2[i2 + 1], data2[i2 + 2], 255);
 				if (d > 5) {
 					data2[i2 + 0] = data2[i2 + 1] = data2[i2 + 2] = data2[i2 + 3] = 0;
@@ -212,7 +206,6 @@ export default class BuffReader {
 		}
 		if (removed > 0) { console.log(removed + " pixels remove from buff template image"); }
 	}
-
 	static readArg(buffer: ImageData, ox: number, oy: number, type: BuffTextTypes) {
 		var lines: string[] = [];
 		var firstResult: any = null;
@@ -244,8 +237,9 @@ export default class BuffReader {
 		if (joinedLen <= 1) {
 			var botC = "", topT = "", bestParenLine = "", bestParenY = -1;
 			var botColors: ColortTriplet[] = [[255, 255, 255], [210, 210, 210], [255, 255, 0], [255, 152, 31]];
+			var boyMin = Math.max(0, oy - 12), boyMax = oy + 5;
 			for (var bci = 0; bci < botColors.length; bci++) {
-				for (var boy = 0; boy <= oy + 5; boy++) {
+				for (var boy = boyMin; boy <= boyMax; boy++) {
 					for (var bcb = 0; bcb < 2; bcb++) {
 						var br = OCR.readLine(buffer, font2, botColors[bci], ox, boy, bcb === 0);
 						if (!br.text) { continue; }
@@ -311,13 +305,10 @@ export default class BuffReader {
 		}
 		// Decimal detection (X.Y debuff timers) — skip "1" since trailing-1 handles it
 		if (str.length === 1 && /[02-9]/.test(str)) {
-			var baseEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
+			var baseEndX2 = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
 			for (var dotOff = 3; dotOff <= 6; dotOff++) {
-				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX + dotOff, oy, true);
-				if (dotResult.text && /^\d$/.test(dotResult.text)) {
-					str = str + "." + dotResult.text;
-					break;
-				}
+				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX2 + dotOff, oy, true);
+				if (dotResult.text && /^\d$/.test(dotResult.text)) { str = str + "." + dotResult.text; break; }
 			}
 		}
 		// Second pass - extend 1-2 digit readings using canBlend
@@ -328,22 +319,17 @@ export default class BuffReader {
 				endX = firstResult.fragments[firstResult.fragments.length - 1].xend;
 				secondPassY = firstResultY;
 			}
-			// Trailing-1: try offsets to find digit hidden by "1" shadow
+			// Trailing-1: try offsets to find digit hidden by "1" shadow (canBlend then non-canBlend)
 			if (str.endsWith("1")) {
 				var preLen = str.length;
-				for (var roff = 2; roff >= 0 && str.length === preLen; roff--) {
-					var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, true);
-					if (rr.text && rr.text.trim() === rr.text && /^\d/.test(rr.text) && rr.text !== "1") { str += rr.text; break; }
-				}
-				if (str.length === preLen) {
+				for (var cb = 1; cb >= 0 && str.length === preLen; cb--)
 					for (var roff = 2; roff >= 0 && str.length === preLen; roff--) {
-						var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, false);
+						var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, cb === 1);
 						if (rr.text && rr.text.trim() === rr.text && /^\d/.test(rr.text) && rr.text !== "1") { str += rr.text; break; }
 					}
-				}
 			}
+			// Suffix extension
 			var suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, true);
-			// For single digit, try offsets with canBlend
 			if (str.length === 1 && !suffix.text) {
 				var sFonts = [font, font2];
 				for (var soff = 0; soff <= 2 && !suffix.text; soff++)
@@ -471,7 +457,6 @@ export default class BuffReader {
 				}
 			}
 			if (bestscore < 50) { return null; }
-
 			//update the isolated buff
 			if (buffinfo.canimprove) {
 				BuffReader.isolateBuffer(state[bestindex].buffer, state[bestindex].bufferx + 1, state[bestindex].buffery + 1, buffinfo.imgdata);
@@ -480,19 +465,15 @@ export default class BuffReader {
 		}
 	}
 }
-
 export class BuffInfo {
 	imgdata: ImageData;
 	isdebuff: boolean;
-
 	buffid: string;
 	final: boolean;
 	canimprove: boolean;
-
 	constructor(imgdata: ImageData, debuff: boolean, id: string, canimprove: boolean) {
 		this.imgdata = imgdata;
 		this.isdebuff = debuff;
-
 		this.buffid = id;
 		this.final = !!id && !canimprove;
 		this.canimprove = canimprove;
