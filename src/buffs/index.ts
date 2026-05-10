@@ -106,10 +106,10 @@ export default class BuffReader {
 
 				if (x + BuffReader.buffsize > buffer.width || y + BuffReader.buffsize > buffer.height) { break; }
 
-				//Have to require exact match here as we get transparency bs otherwise
-				var match = buffer.pixelCompare((this.debuffs ? imgs.debuff : imgs.buff), x, y) == 0;
+				//Allow small tolerance for minor color variations across systems
+				var match = buffer.pixelCompare((this.debuffs ? imgs.debuff : imgs.buff), x, y) < 600;
 				if (!match) {
-					match = buffer.pixelCompare((this.debuffs ? imgs.debuff_alt : imgs.buff_alt), x, y) == 0;
+					match = buffer.pixelCompare((this.debuffs ? imgs.debuff_alt : imgs.buff_alt), x, y) < 600;
 				}
 				if (!match) { break; }
 				r.push(new Buff(buffer, x, y, this.debuffs));
