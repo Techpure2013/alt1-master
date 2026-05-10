@@ -15,7 +15,7 @@ let toolsconfig = {
         "tests": "./index.ts",
     },
     devServer: {
-        static: "./dist",
+        static: ["./dist", { directory: "./tests", publicPath: "/tests" }],
         open: "/tests/index.html"
     }
 }

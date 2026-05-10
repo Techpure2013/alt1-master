@@ -309,8 +309,8 @@ export default class BuffReader {
 			else if (m = str.match(/^(\d+)m($|\s?\()/i)) { r.time = +m[1] * 60; }
 			else if (m = str.match(/^(\d+)($|\s?\()/)) { r.time = +m[1]; }
 		}
-		// Decimal detection (X.Y debuff timers)
-		if (str.length === 1 && /\d/.test(str)) {
+		// Decimal detection (X.Y debuff timers) — skip "1" since trailing-1 handles it
+		if (str.length === 1 && /[02-9]/.test(str)) {
 			var baseEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
 			for (var dotOff = 3; dotOff <= 6; dotOff++) {
 				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX + dotOff, oy, true);
@@ -359,6 +359,17 @@ export default class BuffReader {
 					if (/^[mhrK%]/.test(suffix.text)) { str += suffix.text[0]; }
 					else if (str.endsWith("1") && /^\d/.test(suffix.text)) { str += suffix.text; }
 				} else { str += suffix.text; }
+			}
+		}
+		// Decimal detection for "1" — only after trailing-1 failed to extend
+		if (str === "1") {
+			var baseEndX = baseLine.debugArea.w > 0 ? baseLine.debugArea.x + baseLine.debugArea.w : ox + 8;
+			for (var dotOff = 3; dotOff <= 6; dotOff++) {
+				var dotResult = OCR.readLine(buffer, font, [255, 255, 255], baseEndX + dotOff, oy, true);
+				if (dotResult.text && /^\d$/.test(dotResult.text)) {
+					str = str + "." + dotResult.text;
+					break;
+				}
 			}
 		}
 		// Parens scan with canBlend: stacked buffs OR single-digit/empty readings

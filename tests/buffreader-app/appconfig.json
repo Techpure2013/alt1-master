@@ -1,14 +1,14 @@
 {
 	"appName": "Buff Reader",
-	"description": "Reads buff and debuff timers from the game screen",
+	"description": "Real-time buff and debuff timer tracker for RuneScape",
 	"appUrl": "./index.html",
 	"configUrl": "./appconfig.json",
 	"iconUrl": "",
-	"defaultWidth": 300,
-	"defaultHeight": 200,
-	"minWidth": 200,
-	"minHeight": 100,
-	"maxWidth": 600,
-	"maxHeight": 400,
+	"defaultWidth": 320,
+	"defaultHeight": 400,
+	"minWidth": 240,
+	"minHeight": 200,
+	"maxWidth": 800,
+	"maxHeight": 800,
 	"permissions": "pixel, overlay, gamestate"
 }
