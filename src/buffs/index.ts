@@ -330,9 +330,16 @@ export default class BuffReader {
 			}
 			// Trailing-1: try offsets to find digit hidden by "1" shadow
 			if (str.endsWith("1")) {
-				for (var roff = 2; roff >= 0; roff--) {
+				var preLen = str.length;
+				for (var roff = 2; roff >= 0 && str.length === preLen; roff--) {
 					var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, true);
 					if (rr.text && rr.text.trim() === rr.text && /^\d/.test(rr.text) && rr.text !== "1") { str += rr.text; break; }
+				}
+				if (str.length === preLen) {
+					for (var roff = 2; roff >= 0 && str.length === preLen; roff--) {
+						var rr = OCR.readLine(buffer, font, [255, 255, 255], endX + roff, secondPassY, false);
+						if (rr.text && rr.text.trim() === rr.text && /^\d/.test(rr.text) && rr.text !== "1") { str += rr.text; break; }
+					}
 				}
 			}
 			var suffix = OCR.readLine(buffer, font, [255, 255, 255], endX, secondPassY, true);
