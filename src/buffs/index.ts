@@ -341,10 +341,12 @@ export default class BuffReader {
 						}
 			}
 			if (suffix.text) {
+				var st = suffix.text.replace(/ .*/g, ""); // trim at first space to prevent cross-buff bleed
 				if (str.length === 2) {
-					if (/^[mhrK%]/.test(suffix.text)) { str += suffix.text[0]; }
-					else if (str.endsWith("1") && /^\d/.test(suffix.text)) { str += suffix.text; }
-				} else { str += suffix.text; }
+					if (/^[mK%]/.test(st)) { str += st[0]; }
+					else if (/^hr/.test(st)) { str += "hr"; }
+					else if (str.endsWith("1") && /^\d/.test(st)) { str += st; }
+				} else { str += st; }
 			}
 		}
 		// Decimal detection for "1" — only after trailing-1 failed to extend
@@ -421,7 +423,9 @@ export default class BuffReader {
 			}
 			if (brightPctPix >= 80) { str += "%"; }
 		}
-		r.arg = str;
+		// Clean cross-buff bleed: strip trailing content after valid timer pattern
+		var clean = str.match(/^(\d+(?:\.\d)?(?:m|hr|K|%)?(?:\(\d\))?)/);
+		r.arg = clean ? clean[1] : str;
 		return r;
 	}
 	private static isBrightText(buffer: ImageData, x: number, y: number): boolean {

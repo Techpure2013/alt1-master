@@ -46,6 +46,7 @@ let tests = webpackImages({
 	famtimer2: import("./imgs/famtimer2.data.png"),
 	dismember14: import("./imgs/14dismember.data.png"),
 	glowbuff: import("./imgs/buffs_2026-05-10T21-43-07.data.png"),
+	bigbar: import("./imgs/bigbar.data.png"),
 });
 
 type Expected = { buffs: (string | null)[], debuffs: (string | null)[] };
@@ -108,7 +109,8 @@ let expected: { [key: string]: Expected } = {
 	famtimer: { buffs: ["53", null, "34"], debuffs: ["2.9"] },
 	famtimer2: { buffs: ["53", null, "63m"], debuffs: ["2.9"] },
 	dismember14: { buffs: ["14", "4", "8m", "8", "8"], debuffs: [] },
-	glowbuff: { buffs: ["10", "2"], debuffs: [] }
+	glowbuff: { buffs: ["10", "2"], debuffs: [] },
+	bigbar: { buffs: [null, "25", "2", "60", "89m", "6%", "3", "3", "3", "3", "3", "3"], debuffs: [] }
 };
 
 
